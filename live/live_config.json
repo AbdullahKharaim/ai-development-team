@@ -1,0 +1,7 @@
+{
+  "claude_version": "2.1.300",
+  "codex_version": "0.162.1",
+  "claude_model": null,
+  "codex_model": null,
+  "readiness_max_age_s": 21600
+}

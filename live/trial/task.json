@@ -1,0 +1,16 @@
+{
+  "task_id": "live-parse-duration-001",
+  "objective": "In durations.py add parse_duration(text) -> int, the inverse of format_seconds. Input is a string of up to three components in the fixed order hours, minutes, seconds, written as <non-negative integer><unit> with lowercase units h, m, s and no spaces between components, e.g. '1h30m', '45s', '2h15s', '90m'. Each unit may appear at most once and at least one component is required. Leading and trailing whitespace is ignored. Return the total number of seconds. Raise ValueError for any other string (empty, unknown or uppercase unit, wrong order, repeated unit, missing number or unit, signs, decimals, inner spaces) and TypeError or ValueError for non-string input. Add unit tests for parse_duration to test_durations.py. Standard library only; do not change format_seconds.",
+  "acceptance_criteria": [
+    "parse_duration('1h30m') == 5400, parse_duration('45s') == 45, parse_duration('  3m  ') == 180",
+    "parse_duration raises ValueError for '', '5', '1x', '1m1h', '1h1h', '-5s', '1.5h', '1H', '1h 30m'",
+    "parse_duration(format_seconds(n)) == n for non-negative ints n",
+    "test_durations.py contains unit tests for parse_duration and all repository tests pass",
+    "format_seconds is unchanged; only the standard library is used"
+  ],
+  "test_command": ["python3", "/home/dev/ai-development-team/live/trial/run_tests.py"],
+  "max_cycles": 2,
+  "stage_timeout_s": 900,
+  "test_timeout_s": 120,
+  "task_timeout_s": 3600
+}

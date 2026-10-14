@@ -30,6 +30,7 @@ class Invocation:
     result: ProcResult
     stdout_path: Path
     stderr_path: Path
+    meta: dict | None = None  # live backends: usage, turns, adapter errors (journalled)
 
 
 @dataclass

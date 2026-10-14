@@ -21,6 +21,8 @@ from .proc import SAFE_PATH, ForbiddenExecutable, run_bounded
 from .report import write_report
 
 DIFF_LIMIT = 256 * 1024
+FILE_LIMIT = 64 * 1024
+FILES_TOTAL_LIMIT = 256 * 1024
 TEST_TAIL = 4096
 
 # Final states. Only SUCCEEDED maps to exit code 0.
@@ -94,7 +96,8 @@ class Orchestrator:
         self.deadline = self.t0 + self.task["task_timeout_s"]
         self.base_sha = self.base_branch = None
         self.journal.append("task_received", task=self.task, repo=str(self.repo),
-                            backends={k: b.argv for k, b in self.backends.items()})
+                            backends={k: getattr(b, "command", None) or b.argv
+                                      for k, b in self.backends.items()})
         state, detail, data = SUCCEEDED, "", {}
         try:
             state, detail = self._run()
@@ -119,7 +122,8 @@ class Orchestrator:
                             branch=self.branch, base_sha=self.base_sha)
 
         # PLAN (read-only)
-        self.plan = self._agent("plan", 0, "planner", self._request("plan", 0), read_only=True)
+        self.plan = self._agent("plan", 0, "planner",
+                                self._request("plan", 0, files=self._files()), read_only=True)
 
         prev_sha = self.base_sha
         findings: list[dict] = []
@@ -140,7 +144,8 @@ class Orchestrator:
             tests = self._run_tests(cycle, sha)
 
             review_req = self._request("review", cycle, plan=self.plan, base_sha=self.base_sha,
-                                       commit_sha=sha, **self._diff_payload(sha), tests=tests)
+                                       commit_sha=sha, **self._diff_payload(sha), tests=tests,
+                                       files=self._files())
             review = self._agent("review", cycle, "reviewer", review_req, read_only=True)
             if review["reviewed_sha"] != sha:
                 raise Stop(STALE_REVIEW, f"review cycle {cycle} is bound to "
@@ -220,6 +225,8 @@ class Orchestrator:
                             cleanup_failed=r.cleanup_failed, stdout_bytes=len(r.stdout),
                             stdout_sha256=_sha256(r.stdout), stdout_log=inv.stdout_path.name,
                             stderr_log=inv.stderr_path.name)
+        if inv.meta:
+            self.journal.append("backend_meta", stage=stage, cycle=cycle, **inv.meta)
         if r.cleanup_failed:
             raise Stop(CLEANUP_FAILED, f"{stage} cycle {cycle}: child process group not cleaned up")
         # Workspace checks come before output checks: a modification is the more
@@ -296,6 +303,24 @@ class Orchestrator:
                        f"test command changed tracked/untracked files at cycle {cycle} "
                        "(ignored files are tolerated)")
         return result
+
+    def _files(self) -> dict[str, str]:
+        """Tracked text files of the (clean) worktree, for tool-free planning/review."""
+        files, total = {}, 0
+        for path in self.git.run(self.worktree, "ls-files", "-z").split("\0"):
+            if not path:
+                continue
+            try:
+                text = (self.worktree / path).read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                files[path] = "(binary or unreadable file omitted)"
+                continue
+            if len(text) > FILE_LIMIT or total + len(text) > FILES_TOTAL_LIMIT:
+                files[path] = f"(omitted: {len(text)} characters exceeds the context limit)"
+                continue
+            files[path] = text
+            total += len(text)
+        return files
 
     def _diff_payload(self, sha: str) -> dict:
         diff = self.git.diff(self.worktree, self.base_sha, sha)
