@@ -1,0 +1,15 @@
+{
+  "task_id": "demo-slugify",
+  "objective": "Add slugify(text) to textutil.py: lowercase, trim, collapse runs of non-alphanumeric characters into single hyphens, no leading/trailing hyphens. Add unit tests.",
+  "acceptance_criteria": [
+    "slugify('  Hello, World!  ') == 'hello-world'",
+    "slugify('a--b__c') == 'a-b-c'",
+    "existing tests still pass",
+    "standard library only"
+  ],
+  "test_command": ["python3", "-m", "unittest", "-v"],
+  "max_cycles": 2,
+  "stage_timeout_s": 60,
+  "test_timeout_s": 60,
+  "task_timeout_s": 300
+}

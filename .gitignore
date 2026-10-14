@@ -1,0 +1,4 @@
+.test-work/
+__pycache__/
+*.pyc
+examples/_work/

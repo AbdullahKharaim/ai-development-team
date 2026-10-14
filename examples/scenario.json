@@ -1,0 +1,27 @@
+{
+  "implement": {
+    "write_files": {
+      "textutil.py": "import re\n\n\ndef shout(text):\n    return text.upper()\n\n\ndef slugify(text):\n    return re.sub(r\"[^a-z0-9]+\", \"-\", text.lower())\n",
+      "test_textutil.py": "import unittest\n\nfrom textutil import shout, slugify\n\n\nclass TextUtilTests(unittest.TestCase):\n    def test_shout(self):\n        self.assertEqual(shout(\"hi\"), \"HI\")\n\n    def test_slugify_basic(self):\n        self.assertEqual(slugify(\"  Hello, World!  \"), \"hello-world\")\n\n    def test_slugify_collapses_separators(self):\n        self.assertEqual(slugify(\"a--b__c\"), \"a-b-c\")\n"
+    }
+  },
+  "review:1": {
+    "override": {
+      "verdict": "changes_requested",
+      "summary": "slugify keeps leading/trailing hyphens; the basic test fails.",
+      "findings": [
+        {"id": "R1", "severity": "high", "description": "slugify('  Hello, World!  ') returns '-hello-world-'; strip hyphens and surrounding whitespace."}
+      ]
+    }
+  },
+  "fix:2": {
+    "write_files": {
+      "textutil.py": "import re\n\n\ndef shout(text):\n    return text.upper()\n\n\ndef slugify(text):\n    return re.sub(r\"[^a-z0-9]+\", \"-\", text.strip().lower()).strip(\"-\")\n"
+    }
+  },
+  "review:2": {
+    "override": {
+      "summary": "R1 resolved; behaviour matches all acceptance criteria and tests pass."
+    }
+  }
+}
