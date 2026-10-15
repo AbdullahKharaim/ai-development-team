@@ -188,7 +188,7 @@ class ClaudeCodeBackend:
         env = _live_env(self.real_home, {"DISABLE_AUTOUPDATER": "1",
                                          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
         r = run_bounded(self.build_argv(request["stage"]), cwd=scratch, env=env,
-                        stdin=self.prompt(request).encode(), timeout_s=timeout_s)
+                        stdin=redact(self.prompt(request).encode()), timeout_s=timeout_s)
         out, err = log_prefix.with_suffix(".stdout"), log_prefix.with_suffix(".stderr")
         out.write_bytes(redact(r.stdout))
         err.write_bytes(redact(r.stderr))
@@ -290,7 +290,7 @@ class CodexExecBackend:
         schema_path.write_text(json.dumps(IMPL_SCHEMA))
         env = _live_env(self.real_home, {})
         r = run_bounded(self.build_argv(cwd, schema_path, last_path), cwd=cwd, env=env,
-                        stdin=self.prompt(request).encode(), timeout_s=timeout_s,
+                        stdin=redact(self.prompt(request).encode()), timeout_s=timeout_s,
                         out_limit=8 << 20)
         out, err = log_prefix.with_suffix(".stdout"), log_prefix.with_suffix(".stderr")
         out.write_bytes(redact(r.stdout))

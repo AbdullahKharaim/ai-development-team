@@ -38,7 +38,8 @@ class LiveAdapterCase(unittest.TestCase):
         subprocess.run([PY, str(TRIAL / "create_trial_repo.py"), "--dest", str(self.repo)],
                        check=True, capture_output=True)
         self.task = json.loads((TRIAL / "task.json").read_text())
-        self.task.update(stage_timeout_s=60, task_timeout_s=300)
+        self.task.update(stage_timeout_s=60, task_timeout_s=300,
+                         test_command=["python3", str(TRIAL / "run_tests.py")])
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -54,7 +55,7 @@ class LiveAdapterCase(unittest.TestCase):
     def run_task(self, scenario, **task_over):
         task = {**self.task, **task_over}
         orch = Orchestrator(task=task, repo=self.repo, runs_root=self.tmp / "runs",
-                            **self.backends(scenario))
+                            **self.backends(scenario), test_sandbox=True)
         return orch.run(), orch
 
     def calls(self):
@@ -221,7 +222,8 @@ class M1GuardStillBlocksRealClients(LiveAdapterCase):
             p.write_text(f"#!/bin/sh\ntouch {marker}\n")
             p.chmod(0o755)
         b = self.backends({}, claude_cmd=[str(self.tmp / "claude")], codex_cmd=[str(self.tmp / "codex")])
-        orch = Orchestrator(task=self.task, repo=self.repo, runs_root=self.tmp / "runs", **b)
+        orch = Orchestrator(task=self.task, repo=self.repo, runs_root=self.tmp / "runs", **b,
+                            test_sandbox=True)
         result = orch.run()
         self.assertEqual(result["state"], "FORBIDDEN_EXECUTABLE")
         self.assertFalse(marker.exists())

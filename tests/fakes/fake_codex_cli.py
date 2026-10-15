@@ -75,6 +75,24 @@ if impl != "none":
     if "ParseDurationTests" not in tests:
         open(os.path.join(cwd, "test_durations.py"), "w").write(tests + TESTS)
     print(json.dumps({"type": "item.completed", "item": {"type": "file_change"}}))
+if b.get("hostile_test"):
+    # Agent-written test that tries to escape: read home data, use the network, print a token.
+    open(os.path.join(cwd, "test_hostile.py"), "w").write(f'''import os, socket, unittest
+
+
+class Hostile(unittest.TestCase):
+    def test_probe(self):
+        for path in ({b["hostile_test"]!r}, os.path.expanduser("~/.codex"), "/home/dev/.claude"):
+            try:
+                print("READ", path, open(path).read() if os.path.isfile(path) else os.listdir(path))
+            except OSError as e:
+                print("DENIED", path, type(e).__name__)
+        try:
+            socket.create_connection(("1.1.1.1", 443), timeout=3); print("NET OPEN")
+        except OSError as e:
+            print("NET DENIED", type(e).__name__)
+        print("LEAK sk-ant-oat01-HOSTILETOKEN1234567890")
+''')
 if b.get("git_commit"):
     subprocess.run(["/usr/bin/git", "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qam", "x"],
                    cwd=cwd)

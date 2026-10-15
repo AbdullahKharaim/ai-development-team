@@ -12,21 +12,23 @@ copy was cloned from M1 commit `cc896bd`; the original in the Ubuntu distro is u
 |---|---|---|
 | PLAN, REVIEW | Claude Code `-p` | `--tools ""` (no tools), `--safe-mode`, `--strict-mcp-config`, `--permission-mode dontAsk --permission-prompts none`, `--no-session-persistence`, `--disable-slash-commands`, structured output via `--json-schema`; cwd = an **empty scratch dir**; repo files, diff and test results are supplied in the prompt by the orchestrator |
 | IMPLEMENT, FIX | `codex exec` | built-in permission profile `:workspace` (probed: writes only in the task worktree and /tmp, `.git` read-only so no commits, network blocked), `approval_policy="never"`, `--strict-config --ignore-user-config --ignore-rules --ephemeral`, `--output-schema` + `-o` |
-| TEST | orchestrator | `live/trial/run_tests.py`: repo unit tests + hidden acceptance tests stored outside the worktree |
+| TEST | orchestrator, inside **bubblewrap** (`aidev/test_sandbox.py`, mandatory for live backends) | `/usr/bin/bwrap --unshare-all`: no network; tmpfs over /home (no home data, no ~/.claude or ~/.codex); worktree and the test runner/acceptance dir bound read-only; /usr read-only; private /tmp; cleared env; killed with its PID namespace on timeout. Runs `live/trial/run_tests.py`: repo unit tests + hidden acceptance tests |
 
 Unchanged from M1: state machine, orchestrator-made commits, `reviewed_sha` binding, read-only
 snapshots, ≤ 2 cycles, timeouts, process-group cleanup, hash-chained journal, no merge/push.
 New: per-call `backend_meta` journal events (tokens, turns, cost field, permission denials,
-Codex event counts) and redaction of tokens/e-mails in every live log file.
+Codex event counts) and redaction of tokens/e-mails in every live log file, in test output (logs,
+result.json, the tail handed to the reviewer) and in every prompt sent to either CLI.
 
 ## Verified without inference
 
-- `live/readiness.py` → **49/49 checks passed**: isolation (no root/sudo, no drvfs, no Windows
+- `live/readiness.py` → **55/55 checks passed**: isolation (no root/sudo, no drvfs, no Windows
   PATH, no API-key env vars, distro = agentdev), native user-local ELF executables, pinned versions,
   required flags present in `--help`, the adapters' **exact argv** parse (both CLIs exit with
   "no prompt" on empty stdin, before any model call), subscription login mode (Claude `claude.ai`
-  Pro; Codex "Logged in using ChatGPT"), and the Codex sandbox probe (`live/sandbox_probe.sh`).
-- 80/80 tests: M1's 58 plus 22 live-adapter tests driving the real adapters against fake CLIs that
+  Pro; Codex "Logged in using ChatGPT"), the Codex sandbox probe (`live/sandbox_probe.sh`), and the test sandbox (home canary and both CLI
+  config dirs absent, network denied, worktree read-only).
+- Tests (see below): M1's 58 plus 22 live-adapter tests driving the real adapters against fake CLIs that
   reproduce both CLIs' output formats (end-to-end success, fix cycle, stale SHA, tool use detected
   via the scratch dir, error/non-JSON results, missing Codex final message, self-commit, redaction,
   timeout + descendant cleanup, gate refusal, run-live refusals, source repo untouched).

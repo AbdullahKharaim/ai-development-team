@@ -17,7 +17,10 @@ from . import protocol
 from .backends import CommandBackend
 from .gitops import Git, GitError
 from .journal import Journal
+from . import test_sandbox as test_sandbox_mod
+from .cli_backends import ClaudeCodeBackend, CodexExecBackend
 from .proc import SAFE_PATH, ForbiddenExecutable, run_bounded
+from .redact import redact
 from .report import write_report
 
 DIFF_LIMIT = 256 * 1024
@@ -63,11 +66,22 @@ def _sha256(b: bytes) -> str:
 class Orchestrator:
     def __init__(self, *, task: dict, repo: Path, runs_root: Path,
                  planner: CommandBackend, implementer: CommandBackend,
-                 reviewer: CommandBackend):
+                 reviewer: CommandBackend, test_sandbox: bool = False):
         try:
             self.task = protocol.load_task(task)
         except protocol.ProtocolError as e:
             raise PreflightError(str(e)) from None
+        # Live agents can rewrite the repo's tests, so live runs must sandbox the test command.
+        if not test_sandbox and any(isinstance(b, (ClaudeCodeBackend, CodexExecBackend))
+                                    for b in (planner, implementer, reviewer)):
+            raise PreflightError("live backends require test_sandbox=True")
+        self.test_sandbox = test_sandbox
+        if test_sandbox:
+            try:
+                test_sandbox_mod.check_bwrap()
+                test_sandbox_mod.readonly_dirs(self.task["test_command"])
+            except test_sandbox_mod.SandboxUnavailable as e:
+                raise PreflightError(f"test sandbox: {e}") from None
         self.repo = Path(os.path.realpath(repo))
         self.runs_root = Path(os.path.realpath(runs_root))
         self.backends = {"planner": planner, "implementer": implementer, "reviewer": reviewer}
@@ -282,13 +296,20 @@ class Orchestrator:
         timeout, task_bound = self._budget(self.task["test_timeout_s"])
         env = {"PATH": SAFE_PATH, "HOME": str(self.home), "LANG": "C.UTF-8",
                "PYTHONDONTWRITEBYTECODE": "1"}
+        argv = self.task["test_command"]
+        if self.test_sandbox:
+            argv = test_sandbox_mod.wrap(argv, self.worktree)
         self.journal.append("tests_started", cycle=cycle, commit=sha,
-                            command=self.task["test_command"], timeout_s=round(timeout, 3))
-        r = run_bounded(self.task["test_command"], cwd=self.worktree, env=env, timeout_s=timeout)
-        (self.logs / f"tests-c{cycle}.stdout").write_bytes(r.stdout)
-        (self.logs / f"tests-c{cycle}.stderr").write_bytes(r.stderr)
+                            command=self.task["test_command"], sandboxed=self.test_sandbox,
+                            timeout_s=round(timeout, 3))
+        r = run_bounded(argv, cwd=self.worktree, env=env, timeout_s=timeout)
+        # Test output may come from agent-written code: redact before it is stored,
+        # reported, or handed to the reviewer.
+        stdout, stderr = redact(r.stdout), redact(r.stderr)
+        (self.logs / f"tests-c{cycle}.stdout").write_bytes(stdout)
+        (self.logs / f"tests-c{cycle}.stderr").write_bytes(stderr)
         passed = r.ok
-        tail = (r.stdout + b"\n" + r.stderr)[-TEST_TAIL:].decode(errors="replace")
+        tail = (stdout + b"\n" + stderr)[-TEST_TAIL:].decode(errors="replace")
         result = {"commit": sha, "passed": passed, "returncode": r.returncode,
                   "timed_out": r.timed_out, "duration_s": r.duration_s, "output_tail": tail}
         self.journal.append("tests_finished", cycle=cycle, commit=sha, passed=passed,

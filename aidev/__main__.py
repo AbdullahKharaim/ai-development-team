@@ -64,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(agents, dict) or set(agents) != {"planner", "implementer", "reviewer"}:
                 raise ValueError("agents file needs exactly planner, implementer, reviewer")
             backends = {k: backend_from_config(k, v) for k, v in agents.items()}
-        orch = Orchestrator(task=task, repo=a.repo, runs_root=a.runs_dir, **backends)
+        orch = Orchestrator(task=task, repo=a.repo, runs_root=a.runs_dir, **backends,
+                            test_sandbox=(a.cmd == "run-live"))
     except (OSError, ValueError, PreflightError, LiveGateError) as e:
         print(f"aidev: refused before start: {e}", file=sys.stderr)
         return 2

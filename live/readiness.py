@@ -133,6 +133,35 @@ def main() -> int:
         check(results, f"sandbox_host_{host_check}", probes.get("host:" + host_check) == want,
               probes.get("host:" + host_check, "missing"))
 
+    # --- test-command sandbox (bubblewrap) ----------------------------------------
+    from aidev import test_sandbox as ts
+    try:
+        check(results, "test_sandbox_bwrap_system_binary", ts.check_bwrap() == "/usr/bin/bwrap")
+        with tempfile.TemporaryDirectory(dir=Path.home() / ".cache") as tmp:
+            tmp = Path(tmp)
+            (tmp / "wt").mkdir()
+            canary = tmp / "outside-canary.txt"          # unrelated home data, not bound
+            canary.write_text("readiness-canary")
+            probe = tmp / "fixtures" / "probe.py"
+            probe.parent.mkdir()
+            probe.write_text(
+                "import os, socket\n"
+                f"print('canary', os.path.exists({str(canary)!r}))\n"
+                f"print('codex_dir', os.path.exists({str(Path.home() / '.codex')!r}))\n"
+                f"print('claude_dir', os.path.exists({str(Path.home() / '.claude')!r}))\n"
+                "try:\n    socket.create_connection(('1.1.1.1', 443), timeout=3); print('net open')\n"
+                "except OSError:\n    print('net denied')\n"
+                "try:\n    open('w.txt', 'w'); print('worktree writable')\n"
+                "except OSError:\n    print('worktree read-only')\n")
+            argv = ts.wrap(["python3", str(probe)], tmp / "wt")
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=ENV, cwd=tmp / "wt")
+            out = p.stdout
+        for want in ("canary False", "codex_dir False", "claude_dir False", "net denied",
+                     "worktree read-only"):
+            check(results, f"test_sandbox_{want.replace(' ', '_')}", want in out, out.strip()[:200])
+    except ts.SandboxUnavailable as e:
+        check(results, "test_sandbox_available", False, str(e))
+
     passed = all(r["ok"] for r in results)
     report = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "generated_epoch": int(time.time()), "passed": passed,
@@ -145,6 +174,8 @@ def main() -> int:
                   "Claude tool-free mode is configured by flags; its effective behaviour is observed "
                   "per call (permission_denials, scratch cwd, worktree snapshot), not proven in advance.",
                   "Claude and Codex processes themselves have network access to their providers.",
+                  "The test command runs in bubblewrap (no network, /home hidden, worktree read-only) "
+                  "but shares the kernel and has no CPU/memory limit beyond the test timeout.",
               ]}
     body = json.dumps(report, indent=2, sort_keys=True)
     (ROOT / "live" / "readiness-report.json").write_text(body + "\n")
