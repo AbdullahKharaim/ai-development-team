@@ -110,3 +110,9 @@ Not provided:
   effort. Only the requested values are recorded as fact. Claude's effective model *is* reported.
 - Stall detection compares normalised finding text; rephrased repeats are bounded only by budgets.
 - The journal hash chain detects casual edits, not a deliberate rewrite.
+
+## Using it from Claude Desktop: `/ai-team`
+
+Type `/ai-team <task>` in a Claude Desktop Code session to start a team task, and `/ai-team status`
+(or simply ask about the team task) to follow it. The skill is explicit-only and wraps `live/team.py`
+→ `aidev run-live`; see [docs/AI-TEAM-SKILL.md](docs/AI-TEAM-SKILL.md).
