@@ -188,7 +188,8 @@ class ClaudeCodeBackend:
         env = _live_env(self.real_home, {"DISABLE_AUTOUPDATER": "1",
                                          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
         r = run_bounded(self.build_argv(request["stage"]), cwd=scratch, env=env,
-                        stdin=redact(self.prompt(request).encode()), timeout_s=timeout_s)
+                        stdin=redact(self.prompt(request).encode()), timeout_s=timeout_s,
+                        allowed_client=self.gate.claude)
         out, err = log_prefix.with_suffix(".stdout"), log_prefix.with_suffix(".stderr")
         out.write_bytes(redact(r.stdout))
         err.write_bytes(redact(r.stderr))
@@ -291,7 +292,7 @@ class CodexExecBackend:
         env = _live_env(self.real_home, {})
         r = run_bounded(self.build_argv(cwd, schema_path, last_path), cwd=cwd, env=env,
                         stdin=redact(self.prompt(request).encode()), timeout_s=timeout_s,
-                        out_limit=8 << 20)
+                        out_limit=8 << 20, allowed_client=self.gate.codex)
         out, err = log_prefix.with_suffix(".stdout"), log_prefix.with_suffix(".stderr")
         out.write_bytes(redact(r.stdout))
         err.write_bytes(redact(r.stderr))

@@ -55,6 +55,33 @@ class Proc(unittest.TestCase):
         self.assertTrue(r.output_limit_exceeded)
         self.assertFalse(r.ok)
 
+    def test_killed_members_still_exiting_are_waited_for(self):
+        # Reproduces the observed race: SIGKILLed members stay visible for a few scans.
+        from unittest import mock
+        from aidev import proc
+        seen = {"n": 0}
+        real = proc._group_has_live_members
+
+        def slow_exit(pgid):
+            seen["n"] += 1
+            return True if seen["n"] <= 4 else real(pgid)
+
+        with mock.patch.object(proc, "_group_has_live_members", side_effect=slow_exit):
+            r = run_bounded(["/bin/sh", "-c", "sleep 300 & sleep 300"], cwd=self.tmp, env=ENV,
+                            timeout_s=0.3)
+        self.assertTrue(r.timed_out)
+        self.assertFalse(r.cleanup_failed)
+        self.assertGreater(seen["n"], 4)
+
+    def test_genuine_survivor_still_reported(self):
+        from unittest import mock
+        from aidev import proc
+        with mock.patch.object(proc, "_group_has_live_members", return_value=True), \
+                mock.patch.object(proc, "GROUP_EXIT_GRACE_S", 0.3):
+            r = run_bounded(["/bin/sh", "-c", "exit 0"], cwd=self.tmp, env=ENV, timeout_s=5)
+        self.assertTrue(r.cleanup_failed)
+        self.assertFalse(r.ok)
+
     def test_nonzero_exit(self):
         r = run_bounded(["/bin/sh", "-c", "exit 7"], cwd=self.tmp, env=ENV, timeout_s=10)
         self.assertEqual(r.returncode, 7)

@@ -89,12 +89,24 @@ def check_not_forbidden(path: Path) -> None:
 def run_bounded(argv: list[str], *, cwd: str | os.PathLike, env: dict[str, str],
                 stdin: bytes = b"", timeout_s: float,
                 out_limit: int = DEFAULT_OUT_LIMIT,
-                err_limit: int = DEFAULT_ERR_LIMIT) -> ProcResult:
+                err_limit: int = DEFAULT_ERR_LIMIT,
+                allowed_client: str | None = None) -> ProcResult:
+    """allowed_client: the ONE real CLI launcher a live backend may start.
+
+    Exempts exactly that absolute path (compared after realpath) from the
+    forbidden-client guard. Every other argv[0] and path argument is still
+    checked. Passed only by aidev/cli_backends.py, from a LiveGate that
+    aidev/live.py builds out of a passed, fresh readiness report.
+    """
     if not argv or not all(isinstance(a, str) for a in argv):
         raise ValueError("argv must be a non-empty list of strings")
     if timeout_s <= 0:
         raise ValueError("timeout_s must be positive")
-    argv = [resolve_executable(argv[0])] + list(argv[1:])
+    if (allowed_client is not None and os.path.isabs(argv[0])
+            and os.path.realpath(argv[0]) == os.path.realpath(allowed_client)):
+        argv = list(argv)
+    else:
+        argv = [resolve_executable(argv[0])] + list(argv[1:])
     # Script arguments are also checked so `python3 /path/to/claude` cannot slip past.
     for a in argv[1:]:
         if os.sep in a and Path(a).is_absolute() and Path(a).exists():
@@ -173,13 +185,39 @@ def run_bounded(argv: list[str], *, cwd: str | os.PathLike, env: dict[str, str],
         for f in (p.stdin, p.stdout, p.stderr):
             if f is not None and not f.closed:
                 f.close()
-        if _group_has_live_members(p.pid):
+        if not _group_gone(p.pid):
             cleanup_failed = True
     return ProcResult(argv=argv, returncode=None if timed_out else rc,
                       stdout=bytes(out), stderr=bytes(err), timed_out=timed_out,
                       output_limit_exceeded=limit_hit,
                       duration_s=round(time.monotonic() - start, 3),
                       group_members_killed=members_killed, cleanup_failed=cleanup_failed)
+
+
+GROUP_EXIT_GRACE_S = 2.0
+
+
+def _group_gone(pgid: int, grace_s: float | None = None) -> bool:
+    """Wait (bounded) until no live member of the SIGKILLed group remains.
+
+    kill() returns before its targets have finished exiting: under CPU load,
+    killed members were observed in state R for 1-19 ms before disappearing, so a
+    single immediate /proc scan reported false CLEANUP_FAILED. The group is
+    re-signalled while waiting; anything still alive after `grace_s` is a real
+    survivor and is reported as such.
+    """
+    deadline = time.monotonic() + (GROUP_EXIT_GRACE_S if grace_s is None else grace_s)
+    while _group_has_live_members(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            return False
+        time.sleep(0.005)
+    return True
 
 
 def _group_has_live_members(pgid: int) -> bool:
