@@ -1,119 +1,112 @@
-# aidev — M1 orchestrator (mock agents only)
+# AI Development Team (`aidev`)
 
-A small, deterministic Python orchestrator for a supervised two-agent development
-workflow: **Claude plans and reviews, Codex implements, trusted code enforces the
-workflow, the human merges.**
+A small, deterministic Python orchestrator that makes the official **Claude Code** and
+**OpenAI Codex CLI** clients collaborate on a software task without a human relaying messages:
+**Claude plans and reviews, Codex implements, trusted code enforces the workflow, the human merges.**
 
-> **Status (M1):** the full workflow runs end-to-end against *deterministic mock
-> agents*. No real Claude or Codex session has been run through this
-> orchestrator yet. Real backends are stubbed and hard-disabled.
+> **Verified status:** two real automated runs have completed with real, subscription-authenticated
+> CLIs: a small `parse_duration` task (62.4 s) and the `authlog-threat-analyzer` MVP (352.4 s),
+> each with one review cycle. The **adaptive multi-cycle loop, clarification/re-planning and the
+> explicit Codex model selection** described below are implemented and covered by mock-agent tests,
+> but have **not yet been exercised in a real run**.
 
 ## Workflow
 
 ```
- human: task.json ──► aidev run
-                         │
-   preflight: repo root, clean tree, base branch/SHA, task branch absent
-                         │
-   git worktree add -b aidev/<task_id>  (outside the repo, in runs/<task_id>/worktree)
-                         │
-   PLAN       planner  (read-only; worktree snapshot must be identical afterwards)
-                         │
-   ┌── IMPLEMENT / FIX   implementer writes files; must NOT commit
-   │        │
-   │   orchestrator: git add -A && commit  ──► SHA_n  (parent must be SHA_{n-1})
-   │        │
-   │   TEST  orchestrator runs task.test_command (from the human, not from a model)
-   │        │
-   │   REVIEW  reviewer (read-only) gets diff base..SHA_n + test result
-   │        │    reviewed_sha must equal SHA_n, worktree snapshot must be unchanged
-   │        │
-   │   approve + tests pass ─► SUCCEEDED
-   │   approve + tests fail ─► APPROVED_WITH_FAILING_TESTS (human decides)
-   │   blocked              ─► ESCALATED_BY_REVIEWER
-   └── changes_requested and cycle < max_cycles (≤ 2) ─► next cycle with findings
-                         │
-   report.md + result.json + events.jsonl   — nothing merged, nothing pushed
+ human: task.json ──► aidev run-live --confirm-live            (aidev run = mock/command agents)
+   preflight: repo root, clean tree, base SHA, branch absent, owner-approved live limits, readiness
+   git worktree add -b aidev/<task_id>   (outside the repo)
+   PLAN      Claude (no tools; repo files given in the prompt) ──► plan + complexity recommendation
+   MODEL     trusted code: owner policy + CLI catalog ──► Codex model / reasoning effort (or stop)
+ ┌─ IMPLEMENT/FIX  Codex in its :workspace sandbox; must not commit
+ │     └─ may answer "needs_clarification" ──► Claude RE-PLAN ──► Codex continues (bounded)
+ │   orchestrator commits ──► SHA_n (parent must be SHA_{n-1})
+ │   TEST      trusted test command inside bubblewrap (no network, no home, read-only worktree)
+ │   REVIEW    Claude (no tools) gets diff + test result; reviewed_sha must equal SHA_n
+ │   approve + tests pass ─► SUCCEEDED          approve + tests fail ─► APPROVED_WITH_FAILING_TESTS
+ │   blocked ─► BLOCKED       same findings keep returning ─► STALLED
+ └─ changes_requested, budget left ─► next FIX with the findings
+                              budget used up ─► BUDGET_EXHAUSTED (human may continue: continue_from)
+   report.md + result.json + hash-chained events.jsonl   — nothing merged, nothing pushed
 ```
 
-The orchestrator owns sequencing, git, tests, limits and the journal. Agents
-see a JSON request on stdin and the worktree as cwd; they print one JSON
-response. Agent claims (e.g. `files_changed`) are recorded but git is the source
-of truth.
+Details: [docs/ADAPTIVE-COLLABORATION-AND-MODEL-SELECTION.md](docs/ADAPTIVE-COLLABORATION-AND-MODEL-SELECTION.md)
+and [live/LIVE-RUN.md](live/LIVE-RUN.md).
 
 ## Usage
 
-Requires Linux (WSL2 Ubuntu here), Python ≥ 3.10, git. Standard library only.
+Linux (here: the isolated WSL2 distro `agentdev`), Python ≥ 3.10, git, bubblewrap. Standard library only.
 
 ```bash
-cd m1_orchestrator
-python3 -m unittest discover -s tests          # full suite
-python3 examples/run_example.py                # mock demo → examples/output/
-python3 -m aidev run --task T.json --repo /path/to/repo --runs-dir /path/to/runs --agents agents.json
-python3 -m aidev verify-journal runs/<task_id>/events.jsonl
+python3 -m unittest discover -s tests          # full suite (mock agents and fake CLIs only)
+python3 live/readiness.py                      # non-inference checks; writes live/readiness-report.json
+python3 -m aidev run-live --confirm-live --task T.json --repo REPO --runs-dir RUNS \
+        --readiness live/readiness-report.json
+python3 -m aidev verify-journal RUNS/<task_id>/events.jsonl
 ```
 
 Exit codes: `0` SUCCEEDED · `1` any other final state · `2` refused before start · `130` interrupted.
 
-`agents.json` maps `planner`, `implementer`, `reviewer` to `{argv, env?}`;
-`argv[0]` must be an absolute path. `task.json` fields:
+### Task file
 
 | field | meaning |
 |---|---|
-| `task_id` | `[a-z0-9][a-z0-9-]{0,62}`; also the branch name `aidev/<task_id>` and run directory |
+| `task_id` | `[a-z0-9][a-z0-9-]{0,62}`; branch `aidev/<task_id>` and run directory |
 | `objective`, `acceptance_criteria` | passed to every agent |
-| `test_command` | argv run by the orchestrator in the worktree after every commit |
-| `max_cycles` | 1–2 implementation/review cycles (default 2; hard ceiling 2) |
-| `stage_timeout_s`, `test_timeout_s`, `task_timeout_s` | per-process and overall limits |
+| `test_command` | argv run by the orchestrator after every commit (trusted, from the human) |
+| `complexity` | `simple` / `normal` (default) / `complex` — owner's class; the planner may only raise it |
+| `max_cycles` | implementation/review cycles allowed (default 2; protocol ceiling 10) |
+| `max_model_calls` | all model calls (default `1 + 2·max_cycles + 2·max_clarifications`; ceiling 60) |
+| `max_clarifications` | implementer question → re-plan rounds (default 1; ceiling 3) |
+| `stall_repeat_limit` | same finding in this many reviews → `STALLED` (default 3) |
+| `continue_from` | absolute path of a stopped run to continue (human extension) |
+| `stage_timeout_s`, `test_timeout_s`, `task_timeout_s` | per-call and overall time limits |
+
+`run-live` additionally refuses any task whose limits exceed the owner-approved `live_limits` in
+[live/live_config.json](live/live_config.json) (currently 2 cycles, 7 calls, 1 clarification,
+900 s per call, 3600 s per task — the limits approved for the earlier live runs).
 
 ## Layout
 
 | path | role |
 |---|---|
-| `aidev/orchestrator.py` | state machine, stage checks, final states |
-| `aidev/proc.py` | bounded subprocess runner: process group, deadline, output limits, group kill, real-client guard |
-| `aidev/gitops.py` | git wrapper with fixed identity, no user/system config, hooks disabled |
-| `aidev/protocol.py` | task and response validation (strict, stdlib) |
-| `aidev/journal.py` | hash-chained JSONL journal + verifier |
-| `aidev/backends.py` | `CommandBackend` (used), `ClaudeCliBackend`/`CodexCliBackend` (M2 shape, disabled) |
-| `aidev/report.py` | Markdown report from `result.json` data |
-| `mocks/fake_agent.py` | deterministic mock Claude (`--role claude`) and Codex (`--role codex`) |
-| `tests/` | 58 unit + integration tests on disposable repos under `.test-work/` |
-| `examples/` | demo task, mock scenario, runner, and captured output |
-| `docs/AGENTDEV-ISOLATION-CHECKLIST.md` | how to prepare the isolated WSL distro for M2 |
-| `M1-REPORT.md` | what was built, tested, and what remains |
+| `aidev/orchestrator.py` | adaptive state machine, budgets, stall detection, continuation, git/test checks |
+| `aidev/model_policy.py` | Codex model / reasoning-effort policy and catalog validation |
+| `aidev/cli_backends.py` | live Claude Code and Codex CLI adapters (argv, prompts, output parsing, audit metadata) |
+| `aidev/live.py` | readiness report → `LiveGate` (versions, executables, Codex model catalog) |
+| `aidev/proc.py` | bounded subprocesses, process-group cleanup, real-client allowlist |
+| `aidev/test_sandbox.py` | bubblewrap sandbox for the trusted test command |
+| `aidev/protocol.py`, `journal.py`, `gitops.py`, `redact.py`, `report.py` | contracts, journal, git, redaction, report |
+| `live/` | readiness check, sandbox probe, live config, trial task |
+| `mocks/`, `tests/` | deterministic mock agents, fake CLIs, unit and integration tests |
 
 ## Final states
 
-`SUCCEEDED`, `MAX_CYCLES_REACHED`, `ESCALATED_BY_REVIEWER`, `APPROVED_WITH_FAILING_TESTS`,
-`FAILED_PREFLIGHT`, `FAILED_IMPLEMENTATION`, `AGENT_FAILED`, `INVALID_RESPONSE`,
-`CONFLICTING_COMPLETION`, `STALE_REVIEW`, `UNAUTHORIZED_MODIFICATION`,
+`SUCCEEDED`, `APPROVED_WITH_FAILING_TESTS`, `BUDGET_EXHAUSTED`, `STALLED`, `BLOCKED`,
+`MODEL_UNSUPPORTED`, `FAILED_PREFLIGHT`, `FAILED_IMPLEMENTATION`, `AGENT_FAILED`,
+`INVALID_RESPONSE`, `CONFLICTING_COMPLETION`, `STALE_REVIEW`, `UNAUTHORIZED_MODIFICATION`,
 `TESTS_MODIFIED_WORKTREE`, `STAGE_TIMEOUT`, `TASK_TIMEOUT`, `CLEANUP_FAILED`,
 `FORBIDDEN_EXECUTABLE`, `INTERRUPTED`, `INTERNAL_ERROR`.
-Only `SUCCEEDED` is success; every state is written to the journal, `result.json` and `report.md`.
+Only `SUCCEEDED` is success. (`MAX_CYCLES_REACHED` and `ESCALATED_BY_REVIEWER` from earlier
+versions are now `BUDGET_EXHAUSTED` and `BLOCKED`.)
 
 ## What is enforced, and what is not
 
 Enforced by orchestrator code (and tested):
 
-- Review is bound to the exact commit: `reviewed_sha` must equal the commit just created.
-- Read-only stages (plan, review) are checked by comparing `(HEAD, git status incl. ignored)`
-  before/after; any difference stops the run. Implementers may not move HEAD or switch branch.
-- At most 2 cycles; per-process and overall deadlines; the child's whole process group is
-  SIGKILLed after every stage, including after a normal exit.
-- Exactly one JSON object per response, with exact fields; task/stage/cycle must match.
-- No merge, push, remote, or deletion of evidence; a reused `task_id` is refused.
-- Children run with `PATH=/usr/bin:/bin` and `HOME=<run>/home`; the executables `claude`/`codex`
-  and anything under `~/.local/bin`, `~/.claude`, `~/.codex` are refused before spawn.
+- Review is bound to the exact commit after **every** revision; commits form a linear chain.
+- Plan, re-plan and review must leave the worktree unchanged; implementers may not commit or switch branch.
+- Review-cycle, model-call, clarification and time budgets; per-call timeouts; process-group cleanup.
+- Codex never runs on the CLI's implicit default model/effort: model and effort are explicit and
+  validated against the owner policy and the installed CLI's catalog before the call.
+- Trusted tests run in bubblewrap; live logs, test output and prompts are redacted.
+- No merge, push or remote; a reused `task_id` is refused; continuation requires intact evidence.
 
-**Not** provided (M1 is not a sandbox):
+Not provided:
 
-- **Detection, not prevention.** An agent runs with the orchestrator's Linux identity and can
-  read or write anything that user can. The checks above detect changes *inside the worktree*
-  after the fact; git makes them reversible. Writes elsewhere on the filesystem are not seen.
-- Git gives rollback and integrity of the reviewed artifact, **not confidentiality**.
-- Content changes inside an already-ignored file are invisible to `git status`.
-- A descendant that calls `setsid()` escapes process-group cleanup (needs cgroups).
-- The journal hash chain detects casual edits, not a deliberate rewrite of the whole file.
-- Filesystem isolation for real agents is the job of the separate `agentdev` WSL distro
-  plus each CLI's native sandbox — see the checklist. It is not implemented or verified here.
+- Detection, not prevention, outside the worktree: agents run as the `dev` user; Codex's sandbox
+  confines writes but **not reads**. Isolation from the owner's files comes from the `agentdev` distro.
+- The **effective Codex model is not verifiable**: `codex exec --json` (0.162.1) reports no model or
+  effort. Only the requested values are recorded as fact. Claude's effective model *is* reported.
+- Stall detection compares normalised finding text; rephrased repeats are bounded only by budgets.
+- The journal hash chain detects casual edits, not a deliberate rewrite.

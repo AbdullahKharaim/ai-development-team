@@ -3,5 +3,18 @@
   "codex_version": "0.162.1",
   "claude_model": null,
   "codex_model": null,
-  "readiness_max_age_s": 21600
+  "readiness_max_age_s": 21600,
+  "codex_policy": {
+    "model": "gpt-6.1-sol",
+    "effort_by_complexity": {"simple": "medium", "normal": "high", "complex": "xhigh"},
+    "allowed_models": ["gpt-6.1-sol"],
+    "allowed_efforts": ["medium", "high", "xhigh"]
+  },
+  "live_limits": {
+    "max_cycles": 2,
+    "max_model_calls": 7,
+    "max_clarifications": 1,
+    "stage_timeout_s": 900,
+    "task_timeout_s": 3600
+  }
 }

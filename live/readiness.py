@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from aidev.cli_backends import (ClaudeCodeBackend, CodexExecBackend, LiveGate,  # noqa: E402
                                 resolve_cli)
+from aidev.model_policy import ModelPolicyError, load_policy  # noqa: E402
 from aidev.redact import redact_text  # noqa: E402
 
 PINNED = json.loads((ROOT / "live" / "live_config.json").read_text())
@@ -99,10 +100,34 @@ def main() -> int:
             check(results, f"claude_{stage}_argv_parses",
                   rc == 1 and "Input must be provided" in err, err.strip()[:200])
         subprocess.run(["git", "init", "-q", str(tmp / "wt")], check=True, env=ENV)
-        argv = CodexExecBackend([codex], pending).build_argv(tmp / "wt", tmp / "s.json", tmp / "o.json")
-        rc, out, err = run(argv, stdin="", cwd=tmp / "wt")
-        check(results, "codex_exec_argv_parses", rc == 1 and "No prompt provided" in (out + err),
-              (out + err).strip()[:200])
+        policy = PINNED["codex_policy"]
+        for complexity, effort in sorted(policy["effort_by_complexity"].items()):
+            sel = {"model": policy["model"], "effort": effort, "complexity": complexity}
+            argv = CodexExecBackend([codex], pending).build_argv(tmp / "wt", tmp / "s.json",
+                                                                 tmp / "o.json", sel)
+            rc, out, err = run(argv, stdin="", cwd=tmp / "wt")
+            check(results, f"codex_exec_argv_parses_{complexity}_{effort}",
+                  rc == 1 and "No prompt provided" in (out + err), (out + err).strip()[:200])
+
+    # --- Codex model catalog vs. owner policy (no inference) ----------------------
+    # The CLI accepts any -m / model_reasoning_effort value at parse time, so the
+    # catalog it renders for this login is the only pre-call check available.
+    catalog = {}
+    try:
+        load_policy(PINNED["codex_policy"])
+        check(results, "codex_policy_valid", True)
+        rc, out, err = run([codex, "debug", "models"], timeout=120)
+        models = json.loads(out)["models"]
+        for m in models:
+            if m.get("slug") in PINNED["codex_policy"]["allowed_models"]:
+                catalog[m["slug"]] = [lvl.get("effort", lvl) if isinstance(lvl, dict) else lvl
+                                      for lvl in m.get("supported_reasoning_levels", [])]
+        for model in PINNED["codex_policy"]["allowed_models"]:
+            check(results, f"codex_catalog_has_{model}", model in catalog, json.dumps(catalog.get(model)))
+            for effort in PINNED["codex_policy"]["allowed_efforts"]:
+                check(results, f"codex_catalog_{model}_supports_{effort}", effort in catalog.get(model, []))
+    except (ModelPolicyError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+        check(results, "codex_policy_and_catalog", False, f"{type(e).__name__}: {e}")
 
     # --- subscription auth (mode only) -----------------------------------------
     rc, out, _ = run([claude, "auth", "status"])
@@ -167,7 +192,7 @@ def main() -> int:
               "generated_epoch": int(time.time()), "passed": passed,
               "executables": {"claude": claude, "codex": codex, "claude_real": real["claude"],
                               "codex_real": real["codex"]},
-              "pinned": PINNED, "checks": results,
+              "pinned": PINNED, "checks": results, "codex_catalog": catalog,
               "residual_risks": [
                   "Codex :workspace sandbox does not restrict reads: the agent can read files "
                   "readable by dev, including its own login token.",

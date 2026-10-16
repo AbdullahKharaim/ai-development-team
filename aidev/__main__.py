@@ -8,25 +8,34 @@ import signal
 import sys
 from pathlib import Path
 
+from . import protocol
 from .backends import backend_from_config
 from .cli_backends import LiveGateError
 from .journal import verify_journal
 from .live import live_backends, load_gate
 from .orchestrator import Orchestrator, PreflightError
 
-# Hard limits for live runs, independent of what the task file asks for.
-LIVE_LIMITS = {"max_cycles": 2, "stage_timeout_s": 900, "task_timeout_s": 3600}
+# Live runs are capped by the owner-approved "live_limits" of live/live_config.json, as
+# captured (and hashed) in the readiness report. These keys must all be present there.
+LIVE_LIMIT_KEYS = ("max_cycles", "max_model_calls", "max_clarifications", "stage_timeout_s",
+                   "task_timeout_s")
 
 
-def _live_setup(a, task: dict) -> dict:
+def _live_setup(a, task: dict) -> tuple[dict, dict]:
     if not a.confirm_live:
         raise LiveGateError("run-live needs --confirm-live (real model sessions will run)")
-    for key, limit in LIVE_LIMITS.items():
-        if task.get(key, limit + 1) > limit:
-            raise ValueError(f"live task must set {key} <= {limit}")
-    gate = load_gate(a.readiness)
     pinned = json.loads(a.readiness.read_text())["pinned"]
-    return live_backends(gate, pinned)
+    limits = pinned.get("live_limits")
+    if not isinstance(limits, dict) or set(limits) != set(LIVE_LIMIT_KEYS):
+        raise LiveGateError("readiness report has no complete owner-approved live_limits")
+    effective = protocol.load_task(task)     # applies defaults, e.g. derived max_model_calls
+    for key in LIVE_LIMIT_KEYS:
+        if effective[key] > limits[key]:
+            raise ValueError(f"live task must set {key} <= {limits[key]} (owner-approved live limit)")
+    gate = load_gate(a.readiness)
+    extra = {"test_sandbox": True, "model_policy": pinned["codex_policy"],
+             "model_catalog": gate.codex_catalog}
+    return live_backends(gate, pinned), extra
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,15 +66,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         task = json.loads(a.task.read_text())
+        extra: dict = {}
         if a.cmd == "run-live":
-            backends = _live_setup(a, task)
+            backends, extra = _live_setup(a, task)
         else:
             agents = json.loads(a.agents.read_text())
             if not isinstance(agents, dict) or set(agents) != {"planner", "implementer", "reviewer"}:
                 raise ValueError("agents file needs exactly planner, implementer, reviewer")
             backends = {k: backend_from_config(k, v) for k, v in agents.items()}
-        orch = Orchestrator(task=task, repo=a.repo, runs_root=a.runs_dir, **backends,
-                            test_sandbox=(a.cmd == "run-live"))
+        orch = Orchestrator(task=task, repo=a.repo, runs_root=a.runs_dir, **backends, **extra)
     except (OSError, ValueError, PreflightError, LiveGateError) as e:
         print(f"aidev: refused before start: {e}", file=sys.stderr)
         return 2

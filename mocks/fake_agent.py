@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 
-ROLE_STAGES = {"claude": {"plan", "review"}, "codex": {"implement", "fix"}}
+ROLE_STAGES = {"claude": {"plan", "replan", "review"}, "codex": {"implement", "fix"}}
 
 
 def main() -> int:
@@ -40,10 +40,18 @@ def main() -> int:
     req = json.loads(sys.stdin.read())
     stage, cycle = req["stage"], req["cycle"]
     home = os.environ["HOME"]
-    with open(os.path.join(home, "mock-calls.jsonl"), "a") as fh:
-        fh.write(json.dumps({"role": role, "stage": stage, "cycle": cycle,
+    calls_path = os.path.join(home, "mock-calls.jsonl")
+    seq = 1  # 1-based number of this call among calls with the same stage and cycle
+    if os.path.exists(calls_path):
+        with open(calls_path) as fh:
+            seq += sum(1 for l in fh if (lambda c: c["stage"] == stage and c["cycle"] == cycle)(json.loads(l)))
+    with open(calls_path, "a") as fh:
+        fh.write(json.dumps({"role": role, "stage": stage, "cycle": cycle, "seq": seq,
                              "commit_sha": req.get("commit_sha"),
-                             "n_findings": len(req.get("findings", []))}) + "\n")
+                             "n_findings": len(req.get("findings", [])),
+                             "model_selection": req.get("model_selection"),
+                             "questions": req.get("questions"),
+                             "plan_summary": (req.get("plan") or {}).get("summary")}) + "\n")
     if stage not in ROLE_STAGES[role]:
         print(f"mock {role} does not handle stage {stage}", file=sys.stderr)
         return 3
@@ -53,7 +61,7 @@ def main() -> int:
     if path:
         with open(path) as fh:
             scenario = json.load(fh)
-    b = scenario.get(f"{stage}:{cycle}", scenario.get(stage, {}))
+    b = scenario.get(f"{stage}:{cycle}:{seq}", scenario.get(f"{stage}:{cycle}", scenario.get(stage, {})))
 
     for rel, text in b.get("write_files", {}).items():
         full = os.path.join(os.getcwd(), rel)
@@ -80,8 +88,8 @@ def main() -> int:
 
     resp = {"protocol": req["protocol"], "task_id": req["task_id"], "stage": stage,
             "cycle": cycle}
-    if stage == "plan":
-        resp.update(summary=f"Mock plan: {req['objective'][:80]}",
+    if stage in ("plan", "replan"):
+        resp.update(summary=(f"Mock {stage}: {req['objective'][:80]}"),
                     steps=["Implement the change described in the objective",
                            "Add or update unit tests",
                            "Run the test command and report"])

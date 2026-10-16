@@ -66,7 +66,15 @@ scenario = json.load(open(os.path.join(home, "scenario.json")))
 b = scenario.get(f"{stage}:{n}", scenario.get(stage, {}))
 
 print(json.dumps({"type": "thread.started", "thread_id": "fake"}))
+if b.get("report_model"):   # simulates a CLI version that reports the effective model
+    print(json.dumps({"type": "session.configured", "model": b["report_model"],
+                      "reasoning_effort": b.get("report_effort", "high")}))
 print(json.dumps({"type": "turn.started"}))
+if b.get("clarify"):
+    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 500, "output_tokens": 40}}))
+    open(last, "w").write(json.dumps({"status": "needs_clarification", "summary": "plan is ambiguous",
+                                      "files_changed": [], "questions": b["clarify"]}))
+    sys.exit(0)
 impl = b.get("impl", "good")
 if impl != "none":
     src = open(os.path.join(cwd, "durations.py")).read().split("\n\n_UNITS")[0].rstrip("\n") + "\n"
@@ -105,5 +113,6 @@ print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 2000, "cac
 if not b.get("no_last_message"):
     open(last, "w").write(json.dumps({"status": b.get("status", "done"),
                                       "summary": f"fake {stage} ({impl})",
-                                      "files_changed": ["durations.py", "test_durations.py"]}))
+                                      "files_changed": ["durations.py", "test_durations.py"],
+                                      "questions": []}))
 sys.exit(b.get("exit_code", 0))

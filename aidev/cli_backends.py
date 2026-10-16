@@ -28,11 +28,19 @@ from .proc import ProcResult, run_bounded
 from .redact import redact
 
 FILES_NOTE = "File contents are provided below; you have no tools and must not ask for any."
+COMPLEXITY_NOTE = ("Classify the implementation work as 'simple' (small, local, low-risk change), "
+                   "'normal' (typical feature or fix) or 'complex' (substantial refactoring, tricky "
+                   "debugging, architecture, or high risk) and justify it briefly in "
+                   "complexity_rationale; it selects the implementer's reasoning effort.")
 
 PLAN_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["summary", "steps"],
+    "type": "object", "additionalProperties": False,
+    "required": ["summary", "steps", "complexity", "complexity_rationale"],
     "properties": {"summary": {"type": "string"},
-                   "steps": {"type": "array", "minItems": 1, "items": {"type": "string"}}},
+                   "steps": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                   # A recommendation only: trusted code may raise, never lower, the owner's class.
+                   "complexity": {"type": "string", "enum": list(protocol.COMPLEXITIES)},
+                   "complexity_rationale": {"type": "string"}},
 }
 REVIEW_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -51,11 +59,15 @@ REVIEW_SCHEMA = {
 }
 IMPL_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["status", "summary", "files_changed"],
-    "properties": {"status": {"type": "string", "enum": ["done", "failed"]},
+    "required": ["status", "summary", "files_changed", "questions"],
+    "properties": {"status": {"type": "string", "enum": list(protocol.IMPL_STATUSES)},
                    "summary": {"type": "string"},
-                   "files_changed": {"type": "array", "items": {"type": "string"}}},
+                   "files_changed": {"type": "array", "items": {"type": "string"}},
+                   "questions": {"type": "array", "items": {"type": "string"}}},
 }
+# What `codex exec --json` reports about the model actually used (checked on 0.162.1):
+# nothing - its events carry no model or effort field.
+CODEX_EFFECTIVE_MODEL_SOURCE = "not reported by codex exec --json (0.162.1); unverified"
 
 # Flags that must never appear in a live argv (checked by tests and at build time).
 CLAUDE_FORBIDDEN_FLAGS = {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
@@ -80,6 +92,10 @@ class LiveGate:
     claude: str
     codex: str
     report_sha256: str
+    claude_version: str = ""
+    codex_version: str = ""
+    # {model slug: [reasoning efforts]} from `codex debug models` at readiness time.
+    codex_catalog: dict = field(default_factory=dict, compare=False, hash=False)
 
 
 def _adapter_error(msg: str) -> bytes:
@@ -136,7 +152,7 @@ class ClaudeCodeBackend:
             raise ValueError("command[0] must be absolute")
 
     def build_argv(self, stage: str) -> list[str]:
-        schema = PLAN_SCHEMA if stage == "plan" else REVIEW_SCHEMA
+        schema = PLAN_SCHEMA if stage in ("plan", "replan") else REVIEW_SCHEMA
         a = list(self.command) + [
             "-p", "--output-format", "json", "--json-schema", json.dumps(schema),
             "--tools", "",                 # no built-in tools at all
@@ -162,6 +178,19 @@ class ClaudeCodeBackend:
                 f"{_criteria(req)}\n\nREPOSITORY FILES (base commit):\n{_files_block(req.get('files'))}\n\n"
                 "Produce a concise, concrete implementation plan: which files to change and how, "
                 "edge cases, and which unit tests to add. Do not write the full implementation. "
+                f"{COMPLEXITY_NOTE} Respond only with the structured output.")
+        if req["stage"] == "replan":
+            return (
+                "You are the planning engineer in an automated two-agent workflow. The implementer "
+                "(Codex) stopped and asked for clarification before continuing. Revise the plan so that "
+                "it answers every question concretely; keep what was right.\n"
+                f"{FILES_NOTE}\n\nOBJECTIVE:\n{req['objective']}\n\nACCEPTANCE CRITERIA:\n"
+                f"{_criteria(req)}\n\nPREVIOUS PLAN:\n{json.dumps(req.get('previous_plan'), indent=1)}\n\n"
+                "CLARIFICATION QUESTIONS FROM THE IMPLEMENTER:\n"
+                + "\n".join(f"- {q}" for q in req.get("questions", []))
+                + f"\n\nIMPLEMENTER STATUS SUMMARY:\n{req.get('implementer_summary', '')}\n\n"
+                f"REPOSITORY FILES (current worktree, may include uncommitted work):\n"
+                f"{_files_block(req.get('files'))}\n\n{COMPLEXITY_NOTE} "
                 "Respond only with the structured output.")
         tests = req["tests"]
         return (
@@ -183,7 +212,7 @@ class ClaudeCodeBackend:
                log_prefix: Path) -> Invocation:
         # Claude gets an empty scratch directory, not the worktree: it needs no
         # filesystem access, and any file appearing there reveals tool use.
-        scratch = home.parent / f"claude-cwd-{request['stage']}-c{request['cycle']}"
+        scratch = home.parent / f"claude-cwd-{log_prefix.name}"   # unique per call
         scratch.mkdir()
         env = _live_env(self.real_home, {"DISABLE_AUTOUPDATER": "1",
                                          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
@@ -193,7 +222,8 @@ class ClaudeCodeBackend:
         out, err = log_prefix.with_suffix(".stdout"), log_prefix.with_suffix(".stderr")
         out.write_bytes(redact(r.stdout))
         err.write_bytes(redact(r.stderr))
-        meta: dict = {"backend": self.name}
+        meta: dict = {"backend": self.name, "cli_version": self.gate.claude_version,
+                      "requested_model": self.model}
         leftovers = sorted(p.name for p in scratch.iterdir())
         if leftovers:
             meta["scratch_modified"] = leftovers
@@ -218,7 +248,10 @@ class ClaudeCodeBackend:
         meta.update(num_turns=obj.get("num_turns"), duration_ms=obj.get("duration_ms"),
                     total_cost_usd=obj.get("total_cost_usd"),
                     input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
-                    permission_denials=len(obj.get("permission_denials") or []))
+                    permission_denials=len(obj.get("permission_denials") or []),
+                    # Claude Code's result names the models it actually billed tokens to.
+                    effective_models=sorted((obj.get("modelUsage") or {}).keys()),
+                    effective_model_source="claude -p --output-format json: modelUsage")
         if (obj.get("type") != "result" or obj.get("subtype") != "success"
                 or obj.get("is_error") is not False
                 or not isinstance(obj.get("structured_output"), dict)):
@@ -246,9 +279,15 @@ class CodexExecBackend:
         if not os.path.isabs(self.command[0]):
             raise ValueError("command[0] must be absolute")
 
-    def build_argv(self, worktree: Path, schema_path: Path, last_path: Path) -> list[str]:
+    def build_argv(self, worktree: Path, schema_path: Path, last_path: Path,
+                   selection: dict | None) -> list[str]:
+        # Never run on the CLI's implicit default (gpt-6.1-sol defaults to effort "low").
+        if not selection or not selection.get("model") or not selection.get("effort"):
+            raise ValueError("Codex invocation requires an explicit model selection")
         a = list(self.command) + [
-            "exec", "--strict-config", "--ignore-user-config", "--ignore-rules", "--ephemeral",
+            "exec", "-m", selection["model"],
+            "-c", f'model_reasoning_effort="{selection["effort"]}"',
+            "--strict-config", "--ignore-user-config", "--ignore-rules", "--ephemeral",
             # The exact built-in profile verified by live/sandbox_probe.sh: writes only in
             # the worktree and /tmp, .git read-only, no network.
             "-c", 'default_permissions=":workspace"',
@@ -258,8 +297,8 @@ class CodexExecBackend:
             "--output-schema", str(schema_path), "-o", str(last_path),
             "-C", str(worktree), "-",
         ]
-        if self.model:
-            a[2:2] = ["-m", self.model]
+        if not all(c.isalnum() or c in ".-_" for c in selection["model"] + selection["effort"]):
+            raise ValueError("model/effort contain unexpected characters")
         bad = CODEX_FORBIDDEN_FLAGS.intersection(a)
         if bad:
             raise ValueError(f"forbidden Codex flags: {sorted(bad)}")
@@ -281,7 +320,10 @@ class CodexExecBackend:
                       json.dumps(req.get("findings"), indent=1),
                       f"Your previous attempt is commit {req.get('previous_sha')}; fix the findings."]
         lines += ["", "When finished, reply with the structured output: status 'done' or 'failed', "
-                  "a short summary, and the list of files you changed."]
+                  "a short summary, the list of files you changed, and an empty questions list.",
+                  "Only if the plan is ambiguous or contradictory in a way that blocks correct work, use "
+                  "status 'needs_clarification' with concrete questions; the planner will revise the plan "
+                  "and you will continue in this same worktree."]
         return "\n".join(lines)
 
     def invoke(self, request: dict, *, cwd: Path, home: Path, timeout_s: float,
@@ -290,17 +332,41 @@ class CodexExecBackend:
         last_path = log_prefix.with_suffix(".last-message.json")
         schema_path.write_text(json.dumps(IMPL_SCHEMA))
         env = _live_env(self.real_home, {})
-        r = run_bounded(self.build_argv(cwd, schema_path, last_path), cwd=cwd, env=env,
+        selection = request.get("model_selection")
+        r = run_bounded(self.build_argv(cwd, schema_path, last_path, selection), cwd=cwd, env=env,
                         stdin=redact(self.prompt(request).encode()), timeout_s=timeout_s,
                         out_limit=8 << 20, allowed_client=self.gate.codex)
         out, err = log_prefix.with_suffix(".stdout"), log_prefix.with_suffix(".stderr")
         out.write_bytes(redact(r.stdout))
         err.write_bytes(redact(r.stderr))
-        meta = {"backend": self.name, **self._events(r.stdout)}
+        meta = {"backend": self.name, "cli_version": self.gate.codex_version,
+                "requested_model": selection["model"], "requested_effort": selection["effort"],
+                "complexity": selection.get("complexity"), "selection_rationale": selection.get("rationale"),
+                "effective_model": None, "effective_effort": None,
+                "effective_model_source": CODEX_EFFECTIVE_MODEL_SOURCE, **self._events(r.stdout)}
+        reported = self._reported_model(r.stdout)
+        if reported:   # only if a future CLI version reports it
+            meta.update(effective_model=reported.get("model"), effective_effort=reported.get("effort"),
+                        effective_model_source="codex exec --json event")
+            if reported.get("model") and reported["model"] != selection["model"]:
+                meta["model_mismatch"] = True
         normalized = self._normalize(r, request, last_path, meta)
         if last_path.exists():
             last_path.write_bytes(redact(last_path.read_bytes()))
         return Invocation(_with_stdout(r, normalized), out, err, meta)
+
+    @staticmethod
+    def _reported_model(stdout: bytes) -> dict | None:
+        """Model/effort if any JSONL event carries them as top-level fields; else None."""
+        for line in stdout.splitlines():
+            try:
+                ev = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(ev, dict) and isinstance(ev.get("model"), str):
+                effort = ev.get("reasoning_effort") or ev.get("model_reasoning_effort")
+                return {"model": ev["model"], "effort": effort if isinstance(effort, str) else None}
+        return None
 
     @staticmethod
     def _events(stdout: bytes) -> dict:

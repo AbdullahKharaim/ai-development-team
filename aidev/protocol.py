@@ -9,12 +9,18 @@ is rejected. The orchestrator never trusts an agent's self-reported facts
 from __future__ import annotations
 
 import json
+import os
 import re
 
 PROTOCOL = "aidev.m1/1"
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-MAX_CYCLES_CEILING = 2
+# Absolute ceilings of the protocol. Live runs are further capped by the owner-approved
+# limits in live/live_config.json (enforced by `aidev run-live`).
+MAX_CYCLES_CEILING = 10
+MAX_MODEL_CALLS_CEILING = 60
+MAX_CLARIFICATIONS_CEILING = 3
+COMPLEXITIES = ("simple", "normal", "complex")
 
 
 class ProtocolError(ValueError):
@@ -29,7 +35,12 @@ class ProtocolError(ValueError):
 # ---------------------------------------------------------------- task input
 
 TASK_DEFAULTS = {
-    "max_cycles": 2,
+    "max_cycles": 2,              # implementation/review cycles (each = one commit + one review)
+    "max_model_calls": None,      # None -> 1 + 2*max_cycles + 2*max_clarifications
+    "max_clarifications": 1,      # implementer questions answered by a re-plan
+    "stall_repeat_limit": 3,      # same finding in this many reviews -> STALLED
+    "complexity": "normal",       # owner's classification; the planner may only raise it
+    "continue_from": None,        # previous run dir to continue (human extension)
     "stage_timeout_s": 900,
     "test_timeout_s": 600,
     "task_timeout_s": 3600,
@@ -60,6 +71,22 @@ def load_task(raw: dict) -> dict:
     mc = task["max_cycles"]
     if type(mc) is not int or not 1 <= mc <= MAX_CYCLES_CEILING:
         raise ProtocolError("TASK_INVALID", f"max_cycles must be 1..{MAX_CYCLES_CEILING}")
+    mcl = task["max_clarifications"]
+    if type(mcl) is not int or not 0 <= mcl <= MAX_CLARIFICATIONS_CEILING:
+        raise ProtocolError("TASK_INVALID", f"max_clarifications must be 0..{MAX_CLARIFICATIONS_CEILING}")
+    if task["max_model_calls"] is None:
+        task["max_model_calls"] = 1 + 2 * mc + 2 * mcl
+    calls = task["max_model_calls"]
+    if type(calls) is not int or not 2 <= calls <= MAX_MODEL_CALLS_CEILING:
+        raise ProtocolError("TASK_INVALID", f"max_model_calls must be 2..{MAX_MODEL_CALLS_CEILING}")
+    srl = task["stall_repeat_limit"]
+    if type(srl) is not int or not 2 <= srl <= 10:
+        raise ProtocolError("TASK_INVALID", "stall_repeat_limit must be 2..10")
+    if task["complexity"] not in COMPLEXITIES:
+        raise ProtocolError("TASK_INVALID", f"complexity must be one of {COMPLEXITIES}")
+    cf = task["continue_from"]
+    if cf is not None and not (isinstance(cf, str) and os.path.isabs(cf)):
+        raise ProtocolError("TASK_INVALID", "continue_from must be an absolute run directory path")
     for key in ("stage_timeout_s", "test_timeout_s", "task_timeout_s"):
         v = task[key]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 4 * 3600:
@@ -69,17 +96,26 @@ def load_task(raw: dict) -> dict:
 
 # ---------------------------------------------------------- agent responses
 
-STAGES = ("plan", "implement", "fix", "review")
+STAGES = ("plan", "replan", "implement", "fix", "review")
 VERDICTS = ("approve", "changes_requested", "blocked")
 SEVERITIES = ("critical", "high", "medium", "low")
+IMPL_STATUSES = ("done", "failed", "needs_clarification")
 
 _COMMON = {"protocol": str, "task_id": str, "stage": str, "cycle": int}
+_PLAN = {**_COMMON, "summary": str, "steps": list}
+_IMPL = {**_COMMON, "status": str, "summary": str, "files_changed": list}
 _FIELDS = {
-    "plan": {**_COMMON, "summary": str, "steps": list},
-    "implement": {**_COMMON, "status": str, "summary": str, "files_changed": list},
-    "fix": {**_COMMON, "status": str, "summary": str, "files_changed": list},
+    "plan": _PLAN,
+    "replan": _PLAN,
+    "implement": _IMPL,
+    "fix": _IMPL,
     "review": {**_COMMON, "reviewed_sha": str, "verdict": str, "summary": str, "findings": list},
 }
+# Optional fields (accepted, type-checked, never required): older agents stay valid.
+_PLAN_OPT = {"complexity": str, "complexity_rationale": str}
+_IMPL_OPT = {"questions": list}
+_OPTIONAL = {"plan": _PLAN_OPT, "replan": _PLAN_OPT, "implement": _IMPL_OPT, "fix": _IMPL_OPT,
+             "review": {}}
 
 
 def parse_single_json(stdout: bytes) -> dict:
@@ -105,13 +141,13 @@ def parse_single_json(stdout: bytes) -> dict:
 
 
 def validate_response(obj: dict, *, stage: str, task_id: str, cycle: int) -> dict:
-    fields = _FIELDS[stage]
-    extra = set(obj) - set(fields)
+    fields, optional = _FIELDS[stage], _OPTIONAL[stage]
+    extra = set(obj) - set(fields) - set(optional)
     missing = set(fields) - set(obj)
     if missing or extra:
         raise ProtocolError("RESPONSE_INVALID",
                             f"missing={sorted(missing)} unexpected={sorted(extra)}")
-    for key, typ in fields.items():
+    for key, typ in list(fields.items()) + [(k, t) for k, t in optional.items() if k in obj]:
         v = obj[key]
         if typ is int and type(v) is not int or typ is not int and not isinstance(v, typ):
             raise ProtocolError("RESPONSE_INVALID", f"{key} must be {typ.__name__}")
@@ -121,14 +157,21 @@ def validate_response(obj: dict, *, stage: str, task_id: str, cycle: int) -> dic
         raise ProtocolError("RESPONSE_MISMATCH",
                             f"expected task={task_id} stage={stage} cycle={cycle}, got "
                             f"task={obj['task_id']} stage={obj['stage']} cycle={obj['cycle']}")
-    if stage == "plan":
+    if stage in ("plan", "replan"):
         if not obj["steps"] or not all(isinstance(s, str) and s.strip() for s in obj["steps"]):
             raise ProtocolError("RESPONSE_INVALID", "steps must be non-empty strings")
+        if "complexity" in obj and obj["complexity"] not in COMPLEXITIES:
+            raise ProtocolError("RESPONSE_INVALID", f"complexity must be one of {COMPLEXITIES}")
     elif stage in ("implement", "fix"):
-        if obj["status"] not in ("done", "failed"):
-            raise ProtocolError("RESPONSE_INVALID", "status must be done|failed")
+        if obj["status"] not in IMPL_STATUSES:
+            raise ProtocolError("RESPONSE_INVALID", f"status must be one of {IMPL_STATUSES}")
         if not all(isinstance(f, str) for f in obj["files_changed"]):
             raise ProtocolError("RESPONSE_INVALID", "files_changed must be strings")
+        questions = obj.get("questions", [])
+        if not all(isinstance(q, str) and q.strip() for q in questions):
+            raise ProtocolError("RESPONSE_INVALID", "questions must be non-empty strings")
+        if obj["status"] == "needs_clarification" and not questions:
+            raise ProtocolError("RESPONSE_INVALID", "needs_clarification requires questions")
     elif stage == "review":
         if not SHA_RE.match(obj["reviewed_sha"]):
             raise ProtocolError("RESPONSE_INVALID", "reviewed_sha must be a 40-hex commit id")

@@ -21,7 +21,8 @@ if not prompt:
           file=sys.stderr)
     sys.exit(1)
 schema = argv[argv.index("--json-schema") + 1]
-stage = "review" if "reviewed_sha" in schema else "plan"
+stage = ("review" if "reviewed_sha" in schema
+         else "replan" if "CLARIFICATION QUESTIONS" in prompt else "plan")
 calls_path = os.path.join(home, "calls.jsonl")
 n = 1 + sum(1 for l in open(calls_path) if json.loads(l)["stage"] == stage) if os.path.exists(calls_path) else 1
 with open(calls_path, "a") as fh:
@@ -45,9 +46,12 @@ if "raw" in b:
     sys.stdout.write(b["raw"])
     sys.exit(b.get("exit_code", 0))
 
-if stage == "plan":
-    out = {"summary": "Add parse_duration with a strict regex and tests",
-           "steps": ["Implement parse_duration in durations.py", "Add unit tests"]}
+if stage in ("plan", "replan"):
+    out = {"summary": ("Revised plan answering the questions" if stage == "replan"
+                       else "Add parse_duration with a strict regex and tests"),
+           "steps": ["Implement parse_duration in durations.py", "Add unit tests"],
+           "complexity": b.get("complexity", "normal"),
+           "complexity_rationale": b.get("complexity_rationale", "typical scoped feature")}
 else:
     sha = re.search(r"^COMMIT_SHA: ([0-9a-f]{40})$", prompt, re.M).group(1)
     if b.get("wrong_sha"):
@@ -58,6 +62,7 @@ result = {"type": "result", "subtype": "success", "is_error": bool(b.get("is_err
           "num_turns": 1, "duration_ms": 12, "total_cost_usd": 0.0,
           "usage": {"input_tokens": 1000 + len(prompt) // 4, "output_tokens": 50},
           "permission_denials": [{"tool_name": "Bash"}] * b.get("permission_denials", 0),
+          "modelUsage": {"claude-fake-model": {"inputTokens": 1000, "outputTokens": 50}},
           "structured_output": out, "result": ""}
 print(json.dumps(result))
 sys.exit(b.get("exit_code", 0))

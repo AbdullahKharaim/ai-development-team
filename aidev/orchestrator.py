@@ -13,10 +13,13 @@ import os
 import time
 from pathlib import Path
 
+import re
+
+from . import model_policy as model_policy_mod
 from . import protocol
 from .backends import CommandBackend
 from .gitops import Git, GitError
-from .journal import Journal
+from .journal import Journal, verify_journal
 from . import test_sandbox as test_sandbox_mod
 from .cli_backends import ClaudeCodeBackend, CodexExecBackend
 from .proc import SAFE_PATH, ForbiddenExecutable, run_bounded
@@ -40,9 +43,13 @@ TESTS_MODIFIED_WORKTREE = "TESTS_MODIFIED_WORKTREE"
 STALE_REVIEW = "STALE_REVIEW"
 STAGE_TIMEOUT = "STAGE_TIMEOUT"
 TASK_TIMEOUT = "TASK_TIMEOUT"
-MAX_CYCLES_REACHED = "MAX_CYCLES_REACHED"
-ESCALATED_BY_REVIEWER = "ESCALATED_BY_REVIEWER"
+BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"    # review cycles or model calls used up
+STALLED = "STALLED"                      # the same findings keep coming back
+BLOCKED = "BLOCKED"                      # reviewer blocked, or clarification limit exceeded
+MODEL_UNSUPPORTED = "MODEL_UNSUPPORTED"  # selection not allowed by policy / CLI catalog
 APPROVED_WITH_FAILING_TESTS = "APPROVED_WITH_FAILING_TESTS"
+# A human may continue a run that stopped in one of these states (task "continue_from").
+CONTINUABLE = (BUDGET_EXHAUSTED, STALLED, TASK_TIMEOUT)
 CLEANUP_FAILED = "CLEANUP_FAILED"
 FORBIDDEN_EXECUTABLE = "FORBIDDEN_EXECUTABLE"
 INTERRUPTED = "INTERRUPTED"
@@ -66,11 +73,27 @@ def _sha256(b: bytes) -> str:
 class Orchestrator:
     def __init__(self, *, task: dict, repo: Path, runs_root: Path,
                  planner: CommandBackend, implementer: CommandBackend,
-                 reviewer: CommandBackend, test_sandbox: bool = False):
+                 reviewer: CommandBackend, test_sandbox: bool = False,
+                 model_policy: dict | None = None,
+                 model_catalog: dict[str, list[str]] | None = None):
         try:
             self.task = protocol.load_task(task)
         except protocol.ProtocolError as e:
             raise PreflightError(str(e)) from None
+        # A live Codex call must never run on the CLI's implicit default model/effort.
+        if isinstance(implementer, CodexExecBackend) and (model_policy is None or model_catalog is None):
+            raise PreflightError("live Codex backend requires an explicit model policy and CLI catalog")
+        self.model_policy = model_policy
+        self.model_catalog = model_catalog
+        if model_policy is not None:
+            try:
+                model_policy_mod.load_policy(model_policy)
+                # Fail before any model call if the owner's own classification is not runnable.
+                first = model_policy_mod.select(model_policy, self.task["complexity"])
+                if model_catalog is not None:
+                    model_policy_mod.validate(first, model_policy, model_catalog)
+            except model_policy_mod.ModelPolicyError as e:
+                raise PreflightError(f"model policy: {e}") from None
         # Live agents can rewrite the repo's tests, so live runs must sandbox the test command.
         if not test_sandbox and any(isinstance(b, (ClaudeCodeBackend, CodexExecBackend))
                                     for b in (planner, implementer, reviewer)):
@@ -92,9 +115,13 @@ class Orchestrator:
             raise PreflightError(f"run directory already exists (task_id reused?): {self.run_dir}")
         if self.runs_root == self.repo or self.repo in self.runs_root.parents:
             raise PreflightError("runs directory must be outside the target repository")
-        self.completed: set[tuple[str, int]] = set()
+        self.completed: set[tuple[str, int, int]] = set()
         self.cycles: list[dict] = []
         self.plan: dict | None = None
+        self.calls = 0                  # model calls started (all roles)
+        self.clarifications = 0
+        self.selection: model_policy_mod.ModelSelection | None = None
+        self.prev: dict | None = None   # previous result when continuing a run
 
     # ----------------------------------------------------------------- public
     def run(self) -> dict:
@@ -130,24 +157,41 @@ class Orchestrator:
 
     # --------------------------------------------------------------- workflow
     def _run(self) -> tuple[str, str]:
+        """Adaptive loop: implement/fix -> commit -> tests -> review, until approval.
+
+        Agents decide whether another revision is needed (review verdict) or whether
+        the plan must be clarified (implementer status). This code decides whether
+        that is still allowed: review-cycle, model-call, clarification and time
+        budgets, stall detection, git integrity.
+        """
         self._preflight()
-        self.git.add_worktree(self.repo, self.worktree, self.branch, self.base_sha)
+        start_sha = self.prev["final_commit"] if self.prev else self.base_sha
+        self.git.add_worktree(self.repo, self.worktree, self.branch, start_sha)
         self.journal.append("worktree_created", path=str(self.worktree),
-                            branch=self.branch, base_sha=self.base_sha)
+                            branch=self.branch, base_sha=self.base_sha, start_sha=start_sha)
 
-        # PLAN (read-only)
-        self.plan = self._agent("plan", 0, "planner",
-                                self._request("plan", 0, files=self._files()), read_only=True)
+        history: list[frozenset] = []   # finding fingerprints of every review so far
+        if self.prev:
+            self.plan = self.prev["plan"]
+            findings = self.prev["cycles"][-1]["review"]["findings"]
+            history = [self._fingerprints(c["review"]["findings"]) for c in self.prev["cycles"]]
+            stage = "fix"
+        else:
+            self._need_calls(3, "plan + implement + review")
+            self.plan = self._agent("plan", 0, "planner",
+                                    self._request("plan", 0, files=self._files()), read_only=True)
+            findings, stage = [], "implement"
+        self.selection = self._select_model("plan")
 
-        prev_sha = self.base_sha
-        findings: list[dict] = []
+        prev_sha = start_sha
         max_cycles = self.task["max_cycles"]
-        for cycle in range(1, max_cycles + 1):
-            stage = "implement" if cycle == 1 else "fix"
-            req = self._request(stage, cycle, plan=self.plan, previous_sha=prev_sha,
-                                findings=findings)
-            impl = self._agent(stage, cycle, "implementer", req, read_only=False,
-                               expect_head=prev_sha)
+        cycle = 0
+        while True:
+            if cycle >= max_cycles:
+                raise Stop(BUDGET_EXHAUSTED, f"changes still requested after {cycle} review cycle(s) "
+                           f"(budget {max_cycles}); last commit {prev_sha}", budget="review_cycles")
+            cycle += 1
+            impl = self._implement(stage, cycle, prev_sha, findings)
             if impl["status"] == "failed":
                 raise Stop(FAILED_IMPLEMENTATION, f"{stage} cycle {cycle} reported failure: "
                            f"{impl['summary']}")
@@ -166,7 +210,8 @@ class Orchestrator:
                            f"{review['reviewed_sha']}, implementation commit is {sha}",
                            expected=sha, got=review["reviewed_sha"])
             self.cycles.append({"cycle": cycle, "stage": stage, "commit": sha,
-                                "implementation": impl, "tests": tests, "review": review})
+                                "implementation": impl, "tests": tests, "review": review,
+                                "model_selection": self.selection.to_dict() if self.selection else None})
             self.journal.append("review_bound", cycle=cycle, commit=sha,
                                 verdict=review["verdict"])
 
@@ -177,11 +222,79 @@ class Orchestrator:
                 return (APPROVED_WITH_FAILING_TESTS,
                         f"reviewer approved {sha} but tests did not pass; human decision needed")
             if verdict == "blocked":
-                return ESCALATED_BY_REVIEWER, f"reviewer blocked at {sha}: {review['summary']}"
+                raise Stop(BLOCKED, f"reviewer blocked at {sha}: {review['summary']}", by="reviewer")
+            fps = self._fingerprints(review["findings"])
+            repeated = self._stalled(history, fps)
+            history.append(fps)
+            if repeated:
+                raise Stop(STALLED, f"review cycle {cycle} repeats earlier findings without progress; "
+                           f"last commit {sha}", repeated_findings=sorted(repeated))
             findings = review["findings"]
             prev_sha = sha
-        return (MAX_CYCLES_REACHED,
-                f"changes still requested after {max_cycles} cycle(s); last commit {prev_sha}")
+            stage = "fix"
+
+    def _implement(self, stage: str, cycle: int, prev_sha: str, findings: list[dict]) -> dict:
+        """One implement/fix call, plus at most `max_clarifications` clarification rounds
+        (implementer asks -> planner re-plans -> implementer continues in the same worktree)."""
+        attempt = 0
+        while True:
+            attempt += 1
+            self._need_calls(2, f"{stage} + review in cycle {cycle}")
+            req = self._request(stage, cycle, plan=self.plan, previous_sha=prev_sha, findings=findings,
+                                model_selection=self.selection.to_dict() if self.selection else None)
+            impl = self._agent(stage, cycle, "implementer", req, read_only=False,
+                               expect_head=prev_sha, attempt=attempt)
+            if impl["status"] != "needs_clarification":
+                return impl
+            self.clarifications += 1
+            if self.clarifications > self.task["max_clarifications"]:
+                raise Stop(BLOCKED, f"implementer still needs clarification after "
+                           f"{self.task['max_clarifications']} re-plan(s)", by="implementer",
+                           questions=impl["questions"])
+            self._need_calls(3, f"replan + {stage} + review in cycle {cycle}")
+            replan_req = self._request("replan", cycle, previous_plan=self.plan,
+                                       questions=impl["questions"], implementer_summary=impl["summary"],
+                                       files=self._files())
+            self.plan = self._agent("replan", cycle, "planner", replan_req, read_only=True,
+                                    attempt=self.clarifications)
+            self.selection = self._select_model("replan")
+
+    # ------------------------------------------------------- budgets & policy
+    def _need_calls(self, n: int, what: str) -> None:
+        limit = self.task["max_model_calls"]
+        if self.calls + n > limit:
+            raise Stop(BUDGET_EXHAUSTED, f"model-call budget: {what} needs {n} more call(s), "
+                       f"{limit - self.calls} of {limit} left", budget="model_calls")
+
+    @staticmethod
+    def _fingerprints(findings: list[dict]) -> frozenset:
+        """Severity + normalised description. Rephrased findings are not caught here;
+        the review-cycle and model-call budgets bound that case."""
+        return frozenset(f"{f['severity']}:" + re.sub(r"[^a-z0-9]+", " ", f["description"].lower()).strip()
+                         for f in findings)
+
+    def _stalled(self, history: list[frozenset], fps: frozenset) -> set:
+        if not fps:
+            return set()
+        if history and fps == history[-1]:
+            return set(fps)                         # identical findings twice in a row
+        limit = self.task["stall_repeat_limit"]
+        return {fp for fp in fps if sum(fp in h for h in history) + 1 >= limit}
+
+    def _select_model(self, trigger: str) -> model_policy_mod.ModelSelection | None:
+        if self.model_policy is None:
+            return None
+        plan = self.plan or {}
+        try:
+            sel = model_policy_mod.select(self.model_policy, self.task["complexity"],
+                                          plan.get("complexity"), plan.get("complexity_rationale", ""))
+            if self.model_catalog is not None:
+                model_policy_mod.validate(sel, self.model_policy, self.model_catalog)
+        except model_policy_mod.ModelPolicyError as e:
+            raise Stop(MODEL_UNSUPPORTED, f"model selection after {trigger}: {e}") from None
+        self.journal.append("model_selected", trigger=trigger, **sel.to_dict(),
+                            catalog_checked=self.model_catalog is not None)
+        return sel
 
     def _preflight(self) -> None:
         try:
@@ -199,8 +312,43 @@ class Orchestrator:
             raise Stop(FAILED_PREFLIGHT, "repository has uncommitted changes")
         if self.git.branch_exists(self.repo, self.branch):
             raise Stop(FAILED_PREFLIGHT, f"branch {self.branch} already exists")
+        if self.task["continue_from"]:
+            self._load_continuation(Path(self.task["continue_from"]))
         self.journal.append("preflight_ok", base_branch=self.base_branch,
                             base_sha=self.base_sha)
+
+    def _load_continuation(self, prev_dir: Path) -> None:
+        """Human extension: continue a stopped run from its last reviewed commit.
+
+        The owner starts a NEW task (new task_id, its own budget) with
+        `continue_from`; the previous run's evidence must be intact and consistent."""
+        def bad(msg):
+            raise Stop(FAILED_PREFLIGHT, f"continue_from: {msg}")
+        try:
+            prev = json.loads((prev_dir / "result.json").read_text())
+        except (OSError, ValueError) as e:
+            bad(f"cannot read result.json: {e}")
+        ok, msg = verify_journal(prev_dir / "events.jsonl")
+        if not ok:
+            bad(f"previous journal fails verification: {msg}")
+        if prev.get("repo") != str(self.repo):
+            bad("previous run used a different repository")
+        if prev.get("state") not in CONTINUABLE:
+            bad(f"state {prev.get('state')} is not continuable (allowed: {', '.join(CONTINUABLE)})")
+        if not prev.get("cycles") or prev["cycles"][-1]["review"]["verdict"] != "changes_requested":
+            bad("previous run has no reviewed commit with outstanding findings")
+        if prev.get("base_sha") != self.base_sha:
+            bad("base branch moved since the previous run")
+        try:
+            branch_head = self.git.run(self.repo, "rev-parse", "--verify", prev["task_branch"]).strip()
+        except GitError:
+            bad(f"previous branch {prev.get('task_branch')} not found")
+        if branch_head != prev["final_commit"]:
+            bad("previous task branch no longer points at its final reviewed commit")
+        self.prev = prev
+        self.journal.append("continuation_ok", previous_task=prev["task_id"],
+                            previous_state=prev["state"], start_sha=prev["final_commit"],
+                            previous_cycles=len(prev["cycles"]))
 
     # ----------------------------------------------------------------- stages
     def _request(self, stage: str, cycle: int, **extra) -> dict:
@@ -219,18 +367,22 @@ class Orchestrator:
         return (min(limit, remaining), remaining < limit)
 
     def _agent(self, stage: str, cycle: int, role: str, request: dict, *,
-               read_only: bool, expect_head: str | None = None) -> dict:
-        key = (stage, cycle)
+               read_only: bool, expect_head: str | None = None, attempt: int = 1) -> dict:
+        key = (stage, cycle, attempt)
         if key in self.completed:  # defensive: the loop never schedules a stage twice
             raise Stop(CONFLICTING_COMPLETION, f"{stage} cycle {cycle} already completed")
         timeout, task_bound = self._budget(self.task["stage_timeout_s"])
+        if self.calls >= self.task["max_model_calls"]:   # last line of defence; _need_calls plans ahead
+            raise Stop(BUDGET_EXHAUSTED, "model-call budget exhausted", budget="model_calls")
+        self.calls += 1
         backend = self.backends[role]
         before = self.git.snapshot(self.worktree)
-        self.journal.append("stage_started", stage=stage, cycle=cycle, role=role,
-                            backend=backend.name, timeout_s=round(timeout, 3),
+        self.journal.append("stage_started", stage=stage, cycle=cycle, attempt=attempt, role=role,
+                            backend=backend.name, timeout_s=round(timeout, 3), model_call=self.calls,
                             request_sha256=_sha256(json.dumps(request, sort_keys=True).encode()))
+        suffix = f"-a{attempt}" if attempt > 1 else ""
         inv = backend.invoke(request, cwd=self.worktree, home=self.home, timeout_s=timeout,
-                             log_prefix=self.logs / f"{stage}-c{cycle}")
+                             log_prefix=self.logs / f"{stage}-c{cycle}{suffix}")
         r = inv.result
         self.journal.append("stage_process_exit", stage=stage, cycle=cycle,
                             returncode=r.returncode, timed_out=r.timed_out,
@@ -377,13 +529,21 @@ class Orchestrator:
             "final_commit": final_sha,
             "plan": self.plan,
             "cycles": self.cycles,
+            "model_calls": self.calls,
+            "budget": {k: self.task[k] for k in ("max_cycles", "max_model_calls", "max_clarifications",
+                                                  "stall_repeat_limit", "stage_timeout_s",
+                                                  "task_timeout_s")},
+            "clarifications": self.clarifications,
+            "model_selection": self.selection.to_dict() if self.selection else None,
+            "continued_from": self.prev["task_id"] if self.prev else None,
             "diffstat": diffstat,
             "duration_s": round(time.monotonic() - self.t0, 3),
             "merged": False,
             "pushed": False,
         }
         self.journal.append("task_finished", state=state, success=result["success"],
-                            detail=detail, final_commit=final_sha,
+                            detail=detail, final_commit=final_sha, model_calls=self.calls,
+                            review_cycles=len(self.cycles), clarifications=self.clarifications,
                             base_branch_unchanged=result["base_branch_unchanged"])
         self.journal.close()
         (self.run_dir / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

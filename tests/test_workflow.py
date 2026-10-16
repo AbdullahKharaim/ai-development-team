@@ -62,22 +62,28 @@ class RevisionCycles(OrchestratorTestCase):
         self.assertEqual([c["stage"] for c in calls], ["plan", "implement", "review", "fix", "review"])
         self.assertEqual(calls[3]["n_findings"], 1)  # findings were handed to the fixer
 
-    def test_max_cycles_reached_stops_without_success(self):
+    def test_review_cycle_budget_exhausted_stops_without_success(self):
         fix = {"write_files": {"calc.py": CALC_ALT}}
-        result, orch = self.run_task({"implement": BUGGY_IMPL, "review": CHANGES, "fix": fix})
-        self.assertFinalConsistent(orch, result, "MAX_CYCLES_REACHED")
+        other = {"override": {"verdict": "changes_requested", "summary": "still wrong",
+                              "findings": [{"id": "F2", "severity": "high",
+                                            "description": "multiply() now subtracts"}]}}
+        result, orch = self.run_task({"implement": BUGGY_IMPL, "review:1": CHANGES, "review:2": other,
+                                      "fix": fix})
+        self.assertFinalConsistent(orch, result, "BUDGET_EXHAUSTED")
+        self.assertEqual(result["detail_data"]["budget"], "review_cycles")
         self.assertEqual(len(result["cycles"]), 2)
         self.assertEqual(len([c for c in self.mock_calls(orch) if c["stage"] in ("implement", "fix")]), 2)
 
     def test_max_cycles_one_means_no_fix_attempt(self):
         result, orch = self.run_task({"implement": BUGGY_IMPL, "review": CHANGES}, max_cycles=1)
-        self.assertFinalConsistent(orch, result, "MAX_CYCLES_REACHED")
+        self.assertFinalConsistent(orch, result, "BUDGET_EXHAUSTED")
         self.assertNotIn("fix", [c["stage"] for c in self.mock_calls(orch)])
 
     def test_reviewer_block_escalates(self):
         blocked = {"override": {"verdict": "blocked", "summary": "needs a human decision"}}
         result, orch = self.run_task({"implement": GOOD_IMPL, "review": blocked})
-        self.assertFinalConsistent(orch, result, "ESCALATED_BY_REVIEWER")
+        self.assertFinalConsistent(orch, result, "BLOCKED")
+        self.assertEqual(result["detail_data"]["by"], "reviewer")
 
 
 CALC_ALT = "def add(a, b):\n    return a + b\n\n\ndef multiply(a, b):\n    return a - b\n"
@@ -259,7 +265,7 @@ class Preflight(OrchestratorTestCase):
 
     def test_invalid_task_refused_before_any_write(self):
         with self.assertRaises(PreflightError):
-            Orchestrator(task=task(max_cycles=5), repo=self.repo, runs_root=self.runs,
+            Orchestrator(task=task(max_cycles=11), repo=self.repo, runs_root=self.runs,
                          **self.backends({}))
         self.assertFalse(self.runs.exists())
 
@@ -332,7 +338,7 @@ class CommandLine(OrchestratorTestCase):
     def test_failure_exit_code(self):
         r = self._cli({"implement": BUGGY_IMPL, "review": CHANGES, "fix": {"write_files": {"calc.py": CALC_ALT}}})
         self.assertEqual(r.returncode, 1)
-        self.assertTrue(r.stdout.startswith("MAX_CYCLES_REACHED"))
+        self.assertTrue(r.stdout.startswith("STALLED"), r.stdout)
 
     def test_bad_agents_file_refused(self):
         sp = self.tmp / "agents.json"

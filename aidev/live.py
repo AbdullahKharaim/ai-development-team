@@ -27,11 +27,18 @@ def load_gate(report_path: Path) -> LiveGate:
         raise LiveGateError("claude executable is not the pinned version")
     if f"/{rep['pinned']['codex_version']}-" not in ex["codex_real"]:
         raise LiveGateError("codex executable is not the pinned version")
+    catalog = rep.get("codex_catalog")
+    if not isinstance(catalog, dict) or not catalog:
+        raise LiveGateError("readiness report has no Codex model catalog; rerun live/readiness.py")
     return LiveGate(claude=ex["claude"], codex=ex["codex"],
-                    report_sha256=hashlib.sha256(raw).hexdigest())
+                    report_sha256=hashlib.sha256(raw).hexdigest(),
+                    claude_version=rep["pinned"]["claude_version"],
+                    codex_version=rep["pinned"]["codex_version"],
+                    codex_catalog={k: list(v) for k, v in catalog.items()})
 
 
 def live_backends(gate: LiveGate, pinned: dict) -> dict:
     claude = ClaudeCodeBackend([gate.claude], gate, model=pinned.get("claude_model"))
-    codex = CodexExecBackend([gate.codex], gate, model=pinned.get("codex_model"))
+    # Codex model and effort come per call from the orchestrator's model selection.
+    codex = CodexExecBackend([gate.codex], gate)
     return {"planner": claude, "implementer": codex, "reviewer": claude}

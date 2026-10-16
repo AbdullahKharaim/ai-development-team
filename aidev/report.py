@@ -22,6 +22,23 @@ def write_report(path: Path, r: dict) -> None:
           f"- Final commit: `{r['final_commit']}`",
           "- Merged: **no** · Pushed: **no** (the orchestrator never merges or pushes)",
           f"- Duration: {r['duration_s']} s", ""]
+    if "budget" in r:
+        b = r["budget"]
+        L += ["## Budget and model selection", "",
+              f"- Review cycles used: {len(r['cycles'])} of {b['max_cycles']}",
+              f"- Model calls used: {r['model_calls']} of {b['max_model_calls']}",
+              f"- Clarification rounds: {r['clarifications']} of {b['max_clarifications']}",
+              f"- Stall rule: the same finding in {b['stall_repeat_limit']} reviews, or identical "
+              "findings twice in a row, stops the run"]
+        if r.get("continued_from"):
+            L.append(f"- Continued from run `{r['continued_from']}`")
+        s = r.get("model_selection")
+        if s:
+            L += [f"- Codex requested: `{s['model']}` / reasoning effort `{s['effort']}` "
+                  f"(complexity `{s['complexity']}`, from {s['complexity_source']})",
+                  f"- Selection rationale: {s['rationale']}",
+                  "- Effective Codex model: not reported by the CLI (see `backend_meta` in events.jsonl)"]
+        L.append("")
     if r["plan"]:
         L += ["## Plan", "", r["plan"]["summary"], ""]
         L += [f"{i}. {s}" for i, s in enumerate(r["plan"]["steps"], 1)]

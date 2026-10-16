@@ -74,3 +74,11 @@ Expected subscription usage: 2–5 model calls.
 - Hidden acceptance tests are readable by Codex (not modifiable).
 - The M1 limits remain: detection not prevention outside the worktree; setsid escapes; journal
   chain is tamper-evident only.
+
+## Update: adaptive collaboration and explicit Codex model selection
+
+Since branch `upgrade/adaptive-collab-model-selection`, live runs pass an explicit Codex model and
+reasoning effort (`gpt-6.1-sol` / `high` by default) validated against the owner policy and the CLI
+catalog, and the review/fix loop is adaptive within the owner-approved `live_limits` of
+`live/live_config.json`. See [../docs/ADAPTIVE-COLLABORATION-AND-MODEL-SELECTION.md](../docs/ADAPTIVE-COLLABORATION-AND-MODEL-SELECTION.md).
+These features have not yet been exercised in a real run.

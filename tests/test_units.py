@@ -194,7 +194,7 @@ class Protocol(unittest.TestCase):
 
     def test_task_validation(self):
         protocol.load_task(task())
-        for over in ({"task_id": "Bad ID"}, {"max_cycles": 3}, {"max_cycles": 0},
+        for over in ({"task_id": "Bad ID"}, {"max_cycles": 11}, {"max_cycles": 0}, {"complexity": "huge"}, {"max_model_calls": 1}, {"max_clarifications": 4}, {"continue_from": "relative/dir"},
                      {"test_command": "pytest"}, {"task_timeout_s": 0}, {"auto_merge": True},
                      {"acceptance_criteria": [""]}):
             with self.assertRaises(protocol.ProtocolError, msg=str(over)):

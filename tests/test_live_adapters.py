@@ -25,7 +25,10 @@ from helpers import M1_ROOT, WORK, pid_alive
 FAKES = M1_ROOT / "tests" / "fakes"
 TRIAL = M1_ROOT / "live" / "trial"
 PY = "/usr/bin/python3"
-GATE = cb.LiveGate("test", "test", "test")
+CATALOG = {"gpt-6.1-sol": ["low", "medium", "high", "xhigh", "max", "ultra"]}
+GATE = cb.LiveGate("test", "test", "test", "2.1.300", "0.162.1", CATALOG)
+POLICY = json.loads((M1_ROOT / "live" / "live_config.json").read_text())["codex_policy"]
+SEL_HIGH = {"model": "gpt-6.1-sol", "effort": "high", "complexity": "normal"}
 
 
 class LiveAdapterCase(unittest.TestCase):
@@ -55,7 +58,8 @@ class LiveAdapterCase(unittest.TestCase):
     def run_task(self, scenario, **task_over):
         task = {**self.task, **task_over}
         orch = Orchestrator(task=task, repo=self.repo, runs_root=self.tmp / "runs",
-                            **self.backends(scenario), test_sandbox=True)
+                            **self.backends(scenario), test_sandbox=True,
+                            model_policy=POLICY, model_catalog=CATALOG)
         return orch.run(), orch
 
     def calls(self):
@@ -84,8 +88,11 @@ class ArgvAndGate(unittest.TestCase):
             self.assertEqual("reviewed_sha" in schema["properties"], stage == "review")
 
     def test_codex_argv_uses_verified_workspace_profile(self):
-        a = cb.CodexExecBackend(["/x/codex"], GATE).build_argv(Path("/w"), Path("/s.json"), Path("/o.json"))
+        a = cb.CodexExecBackend(["/x/codex"], GATE).build_argv(Path("/w"), Path("/s.json"), Path("/o.json"),
+                                                               SEL_HIGH)
         self.assertEqual(a[1], "exec")
+        # Explicit model and effort, placed right after the exec subcommand.
+        self.assertEqual(a[2:6], ["-m", "gpt-6.1-sol", "-c", 'model_reasoning_effort="high"'])
         for flag in ("--strict-config", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--json"):
             self.assertIn(flag, a)
         self.assertIn('default_permissions=":workspace"', a)
@@ -94,6 +101,19 @@ class ArgvAndGate(unittest.TestCase):
         self.assertEqual(a[-1], "-")
         self.assertFalse(cb.CODEX_FORBIDDEN_FLAGS & set(a))
         self.assertNotIn("--sandbox", a)  # the profile above is what was probed
+
+    def test_codex_argv_refuses_implicit_or_malformed_selection(self):
+        b = cb.CodexExecBackend(["/x/codex"], GATE)
+        for sel in (None, {}, {"model": "gpt-6.1-sol"}, {"effort": "high"},
+                    {"model": "gpt-6.1-sol; rm", "effort": "high"},
+                    {"model": "gpt-6.1-sol", "effort": 'high" -c x="y'}):
+            with self.assertRaises(ValueError, msg=str(sel)):
+                b.build_argv(Path("/w"), Path("/s.json"), Path("/o.json"), sel)
+
+    def test_plan_schema_asks_for_complexity(self):
+        self.assertIn("complexity", cb.PLAN_SCHEMA["required"])
+        self.assertEqual(cb.PLAN_SCHEMA["properties"]["complexity"]["enum"], ["simple", "normal", "complex"])
+        self.assertIn("needs_clarification", cb.IMPL_SCHEMA["properties"]["status"]["enum"])
 
     def test_backends_require_gate(self):
         with self.assertRaises(cb.LiveGateError):
@@ -211,6 +231,74 @@ class EndToEndWithFakes(LiveAdapterCase):
                                         capture_output=True, text=True).stdout, status_before)
 
 
+class ModelSelectionAndClarificationLive(LiveAdapterCase):
+    def codex_argv(self, n=0):
+        return [c for c in self.calls() if c["tool"] == "codex"][n]["argv"]
+
+    def test_explicit_high_and_requested_vs_effective_evidence(self):
+        result, orch = self.run_task({})
+        self.assertEqual(result["state"], "SUCCEEDED", result["detail"])
+        a = self.codex_argv()
+        self.assertEqual(a[a.index("-m") + 1], "gpt-6.1-sol")
+        self.assertIn('model_reasoning_effort="high"', a)
+        metas = {m["data"]["stage"]: m["data"] for m in self.events(orch, "backend_meta")}
+        cx = metas["implement"]
+        self.assertEqual((cx["requested_model"], cx["requested_effort"], cx["cli_version"]),
+                         ("gpt-6.1-sol", "high", "0.162.1"))
+        self.assertIsNone(cx["effective_model"])           # Codex does not report it: never claimed
+        self.assertIn("unverified", cx["effective_model_source"])
+        self.assertEqual(metas["plan"]["effective_models"], ["claude-fake-model"])
+        sel = self.events(orch, "model_selected")[0]["data"]
+        self.assertEqual((sel["model"], sel["effort"], sel["complexity_source"], sel["catalog_checked"]),
+                         ("gpt-6.1-sol", "high", "task", True))
+        self.assertEqual(result["model_selection"]["effort"], "high")
+
+    def test_planner_can_raise_to_xhigh_for_complex_work(self):
+        result, orch = self.run_task({"plan": {"complexity": "complex",
+                                               "complexity_rationale": "tricky parser state machine"}})
+        self.assertEqual(result["state"], "SUCCEEDED", result["detail"])
+        self.assertIn('model_reasoning_effort="xhigh"', self.codex_argv())
+        sel = self.events(orch, "model_selected")[0]["data"]
+        self.assertEqual((sel["complexity"], sel["complexity_source"]), ("complex", "planner-raised"))
+        self.assertIn("tricky parser", sel["rationale"])
+
+    def test_planner_cannot_downgrade_owner_classification(self):
+        result, orch = self.run_task({"plan": {"complexity": "simple"}})
+        self.assertEqual(result["state"], "SUCCEEDED", result["detail"])
+        self.assertIn('model_reasoning_effort="high"', self.codex_argv())
+        self.assertIn("ignored", self.events(orch, "model_selected")[0]["data"]["rationale"])
+
+    def test_owner_marked_simple_task_uses_medium(self):
+        result, _ = self.run_task({"plan": {"complexity": "simple"}}, complexity="simple")
+        self.assertEqual(result["state"], "SUCCEEDED", result["detail"])
+        self.assertIn('model_reasoning_effort="medium"', self.codex_argv())
+
+    def test_planner_raises_owner_simple_to_normal(self):
+        result, orch = self.run_task({}, complexity="simple")   # fake planner says "normal"
+        self.assertIn('model_reasoning_effort="high"', self.codex_argv())
+        self.assertEqual(self.events(orch, "model_selected")[0]["data"]["complexity_source"],
+                         "planner-raised")
+
+    def test_reported_model_mismatch_is_flagged(self):
+        result, orch = self.run_task({"implement": {"report_model": "gpt-other", "report_effort": "low"}})
+        cx = [m["data"] for m in self.events(orch, "backend_meta") if m["data"]["stage"] == "implement"][0]
+        self.assertEqual((cx["effective_model"], cx["effective_effort"], cx["model_mismatch"]),
+                         ("gpt-other", "low", True))
+
+    def test_clarification_then_replan_then_implement(self):
+        q = "Should a bare '0' without unit be accepted?"
+        result, orch = self.run_task({"implement:1": {"clarify": [q]}})
+        self.assertEqual(result["state"], "SUCCEEDED", result["detail"])
+        stages = [(c["tool"], c["stage"]) for c in self.calls()]
+        self.assertEqual(stages, [("claude", "plan"), ("codex", "implement"), ("claude", "replan"),
+                                  ("codex", "implement"), ("claude", "review")])
+        replan_prompt = [c for c in self.calls() if c["stage"] == "replan"][0]["prompt"]
+        self.assertIn(q, replan_prompt)
+        self.assertIn("Revised plan", self.calls()[3]["prompt"])          # Codex got the new plan
+        self.assertEqual((result["clarifications"], result["model_calls"]), (1, 5))
+        self.assertTrue((orch.run_dir / "logs" / "implement-c1-a2.stdout").exists())
+
+
 class M1GuardStillBlocksRealClients(LiveAdapterCase):
     """Until the owner approves live/PROPOSED-GUARD-CHANGE.patch, executables named
     claude/codex are refused before spawn even through the live backends."""
@@ -223,10 +311,17 @@ class M1GuardStillBlocksRealClients(LiveAdapterCase):
             p.chmod(0o755)
         b = self.backends({}, claude_cmd=[str(self.tmp / "claude")], codex_cmd=[str(self.tmp / "codex")])
         orch = Orchestrator(task=self.task, repo=self.repo, runs_root=self.tmp / "runs", **b,
-                            test_sandbox=True)
+                            test_sandbox=True, model_policy=POLICY, model_catalog=CATALOG)
         result = orch.run()
         self.assertEqual(result["state"], "FORBIDDEN_EXECUTABLE")
         self.assertFalse(marker.exists())
+
+    def test_live_codex_without_model_policy_refused(self):
+        from aidev.orchestrator import PreflightError
+        for kw in ({}, {"model_policy": POLICY}, {"model_catalog": CATALOG}):
+            with self.assertRaises(PreflightError, msg=str(kw)):
+                Orchestrator(task=self.task, repo=self.repo, runs_root=self.tmp / "runs",
+                             **self.backends({}), test_sandbox=True, **kw)
 
 
 class Gate(unittest.TestCase):
@@ -247,7 +342,8 @@ class Gate(unittest.TestCase):
                      "executables": {"claude": str(self.tmp / "claude-link"),
                                      "codex": str(self.tmp / "codex-link"),
                                      "claude_real": str(vdir / "2.1.300"),
-                                     "codex_real": str(rel / "codex")}}
+                                     "codex_real": str(rel / "codex")},
+                     "codex_catalog": CATALOG}
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -260,9 +356,11 @@ class Gate(unittest.TestCase):
     def test_good_report(self):
         g = self._load(self.base)
         self.assertEqual(g.claude, str(self.tmp / "claude-link"))
+        self.assertEqual((g.codex_version, g.codex_catalog), ("0.162.1", CATALOG))
 
     def test_failed_stale_or_changed_reports_refused(self):
-        bad = [dict(self.base, passed=False), dict(self.base, generated_epoch=0)]
+        bad = [dict(self.base, passed=False), dict(self.base, generated_epoch=0),
+               {k: v for k, v in self.base.items() if k != "codex_catalog"}]
         changed = json.loads(json.dumps(self.base))
         changed["executables"]["codex_real"] = "/elsewhere/codex"
         bad.append(changed)
@@ -279,8 +377,13 @@ class RunLiveCommand(unittest.TestCase):
             task = json.loads((TRIAL / "task.json").read_text())
             (tmp / "t.json").write_text(json.dumps(task))
             (tmp / "t2.json").write_text(json.dumps({**task, "stage_timeout_s": 1800}))
+            (tmp / "t3.json").write_text(json.dumps({**task, "max_cycles": 5}))
+            # A failed readiness report carrying the owner-approved limits: the limit check
+            # must refuse before the gate is even consulted.
+            cfg = json.loads((M1_ROOT / "live" / "live_config.json").read_text())
+            (tmp / "readiness.json").write_text(json.dumps({"passed": False, "pinned": cfg}))
             base = [sys.executable, "-m", "aidev", "run-live", "--repo", str(tmp), "--runs-dir",
-                    str(tmp / "runs"), "--readiness", str(tmp / "missing.json")]
+                    str(tmp / "runs"), "--readiness", str(tmp / "readiness.json")]
             r = subprocess.run(base + ["--task", str(tmp / "t.json")], cwd=M1_ROOT,
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 2)
@@ -289,6 +392,16 @@ class RunLiveCommand(unittest.TestCase):
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 2)
             self.assertIn("stage_timeout_s <= 900", r.stderr)
+            # More review cycles than the owner approved for live runs (2) -> refused.
+            r = subprocess.run(base + ["--task", str(tmp / "t3.json"), "--confirm-live"], cwd=M1_ROOT,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("max_cycles <= 2", r.stderr)
+            # Within limits, but the readiness report did not pass -> gate refuses.
+            r = subprocess.run(base + ["--task", str(tmp / "t.json"), "--confirm-live"], cwd=M1_ROOT,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("did not pass", r.stderr)
             self.assertFalse((tmp / "runs").exists())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
