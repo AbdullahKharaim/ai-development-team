@@ -27,7 +27,7 @@ credential files, never merge or push.
 ## A. Status requests
 
 If the arguments are empty, `status`, `status <task-id>` or `list`: run `aiteam.sh status [id]` or
-`aiteam.sh list` and answer in Arabic. This is read-only; start nothing. Interpret `phase`:
+`aiteam.sh list` and answer in the user's language. This is read-only; start nothing. Interpret `phase`:
 
 - `RUNNING` — the workflow is still working (say which step: `current_step`). Not finished.
 - `FINISHED` — finished; the result is `state` (`SUCCEEDED` is the only success).
@@ -63,11 +63,11 @@ If the arguments are empty, `status`, `status <task-id>` or `list`: run `aiteam.
      Deterministic, synthetic data only, temporary directories only, CLI via
      `subprocess.run([sys.executable, "-m", ...])`. Test only what SPEC.md states exactly. These
      tests stay outside the repository; Codex can read but not change them.
-4. **Summarise in Arabic** (3-6 lines): project name, scope, architecture, what is deferred, complexity.
+4. **Summarise in the user's language** (3-6 lines): project name, scope, architecture, what is deferred, complexity.
 5. **Start:** `aiteam.sh start <staging>` (use a Bash timeout of 300000 ms). It runs readiness (no
    inference, ~5 s) and launches the real workflow **detached** inside agentdev; it returns
    `task_id`. If it fails, report the error; no model has run.
-6. **Report the launch in Arabic:** the `task_id`, that Claude (plan, review) and Codex (implement)
+6. **Report the launch in the user's language:** the `task_id`, that Claude (plan, review) and Codex (implement)
    now collaborate in the background independently of this conversation, the budget, and how to
    follow it: `/ai-team status <task_id>` (or just ask about the team task's status).
    Say clearly: this conversation going idle does **not** mean the task is finished — only
@@ -76,7 +76,7 @@ If the arguments are empty, `status`, `status <task-id>` or `list`: run `aiteam.
    `aiteam.sh status <task_id>` no longer shows `"phase": "RUNNING"` (poll every 60 s, at most
    65 min). Do not loop with repeated short checks in conversation turns.
 8. **Final report** (when `FINISHED`): read `report.md` from the run directory
-   (`\\wsl.localhost\agentdev` + `run_dir` + `\report.md`) and report in Arabic: final `state`,
+   (`\\wsl.localhost\agentdev` + `run_dir` + `\report.md`) and report in the user's language: final `state`,
    review cycles, model calls, Codex model/effort **requested** (the effective Codex model is not
    reported by the CLI — say so), tests and acceptance result, review findings, final commit,
    project path, and that nothing was merged or pushed. Do not call anything a success unless

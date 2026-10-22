@@ -1,0 +1,21 @@
+test_shout (test_textutil.TextUtilTests.test_shout) ... ok
+test_slugify_basic (test_textutil.TextUtilTests.test_slugify_basic) ... FAIL
+test_slugify_collapses_separators (test_textutil.TextUtilTests.test_slugify_collapses_separators) ... ok
+
+======================================================================
+FAIL: test_slugify_basic (test_textutil.TextUtilTests.test_slugify_basic)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dev/ai-development-team/examples/_work/runs/demo-slugify/worktree/test_textutil.py", line 11, in test_slugify_basic
+    self.assertEqual(slugify("  Hello, World!  "), "hello-world")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: '-hello-world-' != 'hello-world'
+- -hello-world-
+? -           -
++ hello-world
+
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+FAILED (failures=1)

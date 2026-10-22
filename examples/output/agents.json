@@ -1,0 +1,38 @@
+{
+  "planner": {
+    "argv": [
+      "/usr/bin/python3",
+      "-I",
+      "/home/dev/ai-development-team/mocks/fake_agent.py",
+      "--role",
+      "claude"
+    ],
+    "env": {
+      "AIDEV_MOCK_SCENARIO": "/home/dev/ai-development-team/examples/scenario.json"
+    }
+  },
+  "implementer": {
+    "argv": [
+      "/usr/bin/python3",
+      "-I",
+      "/home/dev/ai-development-team/mocks/fake_agent.py",
+      "--role",
+      "codex"
+    ],
+    "env": {
+      "AIDEV_MOCK_SCENARIO": "/home/dev/ai-development-team/examples/scenario.json"
+    }
+  },
+  "reviewer": {
+    "argv": [
+      "/usr/bin/python3",
+      "-I",
+      "/home/dev/ai-development-team/mocks/fake_agent.py",
+      "--role",
+      "claude"
+    ],
+    "env": {
+      "AIDEV_MOCK_SCENARIO": "/home/dev/ai-development-team/examples/scenario.json"
+    }
+  }
+}

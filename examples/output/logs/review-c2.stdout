@@ -1,0 +1,1 @@
+{"protocol": "aidev.m1/1", "task_id": "demo-slugify", "stage": "review", "cycle": 2, "reviewed_sha": "c0cb71fadf685487bf112b8851ee3e06a355ea9b", "verdict": "approve", "findings": [], "summary": "R1 resolved; behaviour matches all acceptance criteria and tests pass."}

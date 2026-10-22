@@ -1,0 +1,1 @@
+{"protocol": "aidev.m1/1", "task_id": "demo-slugify", "stage": "plan", "cycle": 0, "summary": "Mock plan: Add slugify(text) to textutil.py: lowercase, trim, collapse runs of non-alphanum", "steps": ["Implement the change described in the objective", "Add or update unit tests", "Run the test command and report"]}

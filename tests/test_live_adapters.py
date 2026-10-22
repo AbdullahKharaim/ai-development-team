@@ -300,8 +300,8 @@ class ModelSelectionAndClarificationLive(LiveAdapterCase):
 
 
 class M1GuardStillBlocksRealClients(LiveAdapterCase):
-    """Until the owner approves live/PROPOSED-GUARD-CHANGE.patch, executables named
-    claude/codex are refused before spawn even through the live backends."""
+    """Executables named claude/codex that are not the gated launcher path
+    (`allowed_client`) are refused before spawn, even through the live backends."""
 
     def test_live_backends_with_client_named_executables_are_refused(self):
         marker = self.tmp / "EXECUTED"

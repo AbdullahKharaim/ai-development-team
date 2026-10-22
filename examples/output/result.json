@@ -1,0 +1,122 @@
+{
+  "base_branch": "main",
+  "base_branch_head_after": "ddaada4f08713d539a8d94dc328268c0d207787b",
+  "base_branch_unchanged": true,
+  "base_sha": "ddaada4f08713d539a8d94dc328268c0d207787b",
+  "budget": {
+    "max_clarifications": 1,
+    "max_cycles": 2,
+    "max_model_calls": 7,
+    "stage_timeout_s": 60,
+    "stall_repeat_limit": 3,
+    "task_timeout_s": 300
+  },
+  "clarifications": 0,
+  "continued_from": null,
+  "cycles": [
+    {
+      "commit": "df22cfd6f2233cfd1729320aa3f17c7c10fac19b",
+      "cycle": 1,
+      "implementation": {
+        "cycle": 1,
+        "files_changed": [
+          "test_textutil.py",
+          "textutil.py"
+        ],
+        "protocol": "aidev.m1/1",
+        "stage": "implement",
+        "status": "done",
+        "summary": "Mock implement for cycle 1",
+        "task_id": "demo-slugify"
+      },
+      "model_selection": null,
+      "review": {
+        "cycle": 1,
+        "findings": [
+          {
+            "description": "slugify('  Hello, World!  ') returns '-hello-world-'; strip hyphens and surrounding whitespace.",
+            "id": "R1",
+            "severity": "high"
+          }
+        ],
+        "protocol": "aidev.m1/1",
+        "reviewed_sha": "df22cfd6f2233cfd1729320aa3f17c7c10fac19b",
+        "stage": "review",
+        "summary": "slugify keeps leading/trailing hyphens; the basic test fails.",
+        "task_id": "demo-slugify",
+        "verdict": "changes_requested"
+      },
+      "stage": "implement",
+      "tests": {
+        "commit": "df22cfd6f2233cfd1729320aa3f17c7c10fac19b",
+        "duration_s": 0.076,
+        "output_tail": "\ntest_shout (test_textutil.TextUtilTests.test_shout) ... ok\ntest_slugify_basic (test_textutil.TextUtilTests.test_slugify_basic) ... FAIL\ntest_slugify_collapses_separators (test_textutil.TextUtilTests.test_slugify_collapses_separators) ... ok\n\n======================================================================\nFAIL: test_slugify_basic (test_textutil.TextUtilTests.test_slugify_basic)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/dev/ai-development-team/examples/_work/runs/demo-slugify/worktree/test_textutil.py\", line 11, in test_slugify_basic\n    self.assertEqual(slugify(\"  Hello, World!  \"), \"hello-world\")\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: '-hello-world-' != 'hello-world'\n- -hello-world-\n? -           -\n+ hello-world\n\n\n----------------------------------------------------------------------\nRan 3 tests in 0.001s\n\nFAILED (failures=1)\n",
+        "passed": false,
+        "returncode": 1,
+        "timed_out": false
+      }
+    },
+    {
+      "commit": "c0cb71fadf685487bf112b8851ee3e06a355ea9b",
+      "cycle": 2,
+      "implementation": {
+        "cycle": 2,
+        "files_changed": [
+          "textutil.py"
+        ],
+        "protocol": "aidev.m1/1",
+        "stage": "fix",
+        "status": "done",
+        "summary": "Mock fix for cycle 2",
+        "task_id": "demo-slugify"
+      },
+      "model_selection": null,
+      "review": {
+        "cycle": 2,
+        "findings": [],
+        "protocol": "aidev.m1/1",
+        "reviewed_sha": "c0cb71fadf685487bf112b8851ee3e06a355ea9b",
+        "stage": "review",
+        "summary": "R1 resolved; behaviour matches all acceptance criteria and tests pass.",
+        "task_id": "demo-slugify",
+        "verdict": "approve"
+      },
+      "stage": "fix",
+      "tests": {
+        "commit": "c0cb71fadf685487bf112b8851ee3e06a355ea9b",
+        "duration_s": 0.06,
+        "output_tail": "\ntest_shout (test_textutil.TextUtilTests.test_shout) ... ok\ntest_slugify_basic (test_textutil.TextUtilTests.test_slugify_basic) ... ok\ntest_slugify_collapses_separators (test_textutil.TextUtilTests.test_slugify_collapses_separators) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nOK\n",
+        "passed": true,
+        "returncode": 0,
+        "timed_out": false
+      }
+    }
+  ],
+  "detail": "approved at c0cb71fadf685487bf112b8851ee3e06a355ea9b after 2 cycle(s); tests passed",
+  "detail_data": {},
+  "diffstat": " test_textutil.py | 8 +++++++-\n textutil.py      | 7 +++++++\n 2 files changed, 14 insertions(+), 1 deletion(-)\n",
+  "duration_s": 0.705,
+  "final_commit": "c0cb71fadf685487bf112b8851ee3e06a355ea9b",
+  "merged": false,
+  "model_calls": 5,
+  "model_selection": null,
+  "plan": {
+    "cycle": 0,
+    "protocol": "aidev.m1/1",
+    "stage": "plan",
+    "steps": [
+      "Implement the change described in the objective",
+      "Add or update unit tests",
+      "Run the test command and report"
+    ],
+    "summary": "Mock plan: Add slugify(text) to textutil.py: lowercase, trim, collapse runs of non-alphanum",
+    "task_id": "demo-slugify"
+  },
+  "pushed": false,
+  "repo": "/home/dev/ai-development-team/examples/_work/repo",
+  "state": "SUCCEEDED",
+  "success": true,
+  "task_branch": "aidev/demo-slugify",
+  "task_id": "demo-slugify",
+  "worktree": "/home/dev/ai-development-team/examples/_work/runs/demo-slugify/worktree"
+}

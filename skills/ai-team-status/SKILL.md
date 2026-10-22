@@ -14,7 +14,7 @@ bash "${CLAUDE_SKILL_DIR}/scripts/status.sh" status <task-id>
 bash "${CLAUDE_SKILL_DIR}/scripts/status.sh" list              # all team tasks
 ```
 
-Answer in Arabic from the JSON only:
+Answer in the user's language, from the JSON only:
 
 - `phase: RUNNING` — still working; name `current_step` (stage, cycle). Not finished.
 - `phase: FINISHED` — done; the outcome is `state`. Only `SUCCEEDED` is success. Report

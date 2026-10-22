@@ -1,0 +1,8 @@
+test_shout (test_textutil.TextUtilTests.test_shout) ... ok
+test_slugify_basic (test_textutil.TextUtilTests.test_slugify_basic) ... ok
+test_slugify_collapses_separators (test_textutil.TextUtilTests.test_slugify_collapses_separators) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.000s
+
+OK

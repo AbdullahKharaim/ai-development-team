@@ -93,5 +93,10 @@ Known limitation: agents run in their own process session (needed for the orches
 cleanup). If the orchestrator itself is killed (`DIED`), an agent that was running keeps going
 until it ends by itself; `status` then lists it under `orphan_processes` (reported, not killed).
 
-Not verified here: a real (non-mock) `/ai-team` run — it needs the owner's explicit invocation and
-consumes subscription usage.
+Real use: the first real `/ai-team` task (`csv-quality-checker`, 2026-10-17) was typed by the owner
+in Claude Desktop, launched detached, followed with the status path and finished `SUCCEEDED`
+(3 model calls, 1 review cycle, 256.7 s; Codex requested `gpt-6.1-sol`/`high`). See
+[REAL-RUNS.md](REAL-RUNS.md). Multi-cycle, clarification and stall behaviour have not yet occurred
+in a real `/ai-team` run.
+
+Setup for a new machine: [INSTALL.md](INSTALL.md). The skill replies in the user's language.

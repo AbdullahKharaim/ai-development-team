@@ -6,13 +6,14 @@ the orchestrator's request, runs the CLI once, and returns an `Invocation` whose
 orchestrator already validates. Everything that is a fact (commit, diff, test
 result) still comes from the orchestrator, not from the model.
 
-Execution goes through `proc.run_bounded`, so the M1 real-client guard applies
-unchanged: with the real executables these backends are refused
-(FORBIDDEN_EXECUTABLE) until the owner approves the guard change proposed in
-live/PROPOSED-GUARD-CHANGE.patch. With fake CLIs (tests) they run normally.
+Execution goes through `proc.run_bounded`. Its real-client guard refuses any
+executable named claude/codex (or under ~/.local/bin, ~/.claude, ~/.codex) except
+the single launcher path a backend passes as `allowed_client`, which comes from a
+LiveGate built only from a passed, fresh, version-matching readiness report
+(aidev/live.py). Any other attempt to start a real client is FORBIDDEN_EXECUTABLE.
 
 Flags were checked against `--help` of Claude Code 2.1.300 and Codex CLI 0.162.1
-and parse-validated without inference (empty stdin); see live/readiness.sh.
+and parse-validated without inference (empty stdin); see live/readiness.py.
 """
 
 from __future__ import annotations

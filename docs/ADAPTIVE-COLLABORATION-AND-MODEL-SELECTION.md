@@ -1,8 +1,10 @@
 # Adaptive collaboration and Codex model selection
 
-Implemented on branch `upgrade/adaptive-collab-model-selection`. Verified with deterministic
-mock agents and fake CLIs, plus non-inference checks against the installed CLIs; **not yet
-exercised in a real model run.**
+Verified with deterministic mock agents and fake CLIs, plus non-inference checks against the
+installed CLIs. In real use, **explicit model selection** has been exercised once (the
+`csv-quality-checker` run requested `gpt-6.1-sol`/`high` and succeeded); the **multi-cycle,
+clarification, stall and continuation** paths have not yet occurred in a real run
+(see [REAL-RUNS.md](REAL-RUNS.md)).
 
 ## 1. Codex model and reasoning-effort selection
 
